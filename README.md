@@ -7,8 +7,6 @@ DevToolkit has two jobs:
 1. **Be useful.** Tools DevOps engineers reach for every day, starting with a docker-compose to Kubernetes converter.
 2. **Be a clean example.** Raw Kubernetes manifests (no Helm yet), health probes, resource limits, non-root containers and a full CI/CD pipeline, all small enough to read in one sitting.
 
-> **Status:** Phase 1 is done: `converter-api` is built, tested and ready to deploy. Next up are `utility-api` and a web frontend. See the [roadmap](docs/roadmap.md).
-
 ## What it does
 
 Send a `docker-compose.yaml` and get back Kubernetes Deployments and Services, plus notes on anything that needs a human decision.
@@ -70,11 +68,3 @@ make cluster-down   # delete the cluster when you're done
 | [Deploying to your cluster](docs/operations/deploy.md) | Run it on any Kubernetes cluster |
 | [Configuration](docs/configuration.md) | Environment variables |
 | [Roadmap](docs/roadmap.md) | Phases, future plans, out of scope |
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Found a security problem? See [SECURITY.md](SECURITY.md).
-
-## License
-
-[MIT](LICENSE)
