@@ -85,4 +85,4 @@ kind: Service
 | [CI/CD](docs/operations/ci-cd.md) | Workflows, image publishing, security scanning |
 | [Deploying to your cluster](docs/operations/deploy.md) | Run it on any Kubernetes cluster |
 | [Configuration](docs/configuration.md) | Environment variables |
-| [Roadmap](docs/roadmap.md) | Phases, future plans, out of scope |
+| [Roadmap](docs/roadmap.md) | Planned features in priority order, timeline, out of scope |

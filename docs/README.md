@@ -19,7 +19,7 @@ Start with the [main README](../README.md) for the quick start. Everything else 
 
 ## Where it's going
 
-- [Roadmap](roadmap.md): phases, future plans, and what's out of scope
+- [Roadmap](roadmap.md): planned features in priority order, timeline, and what's out of scope
 
 ## Contributing
 

@@ -24,16 +24,9 @@ Example: adding a CloudFormation to Terraform converter.
 3. **Tests.** Add `tests/test_cfn_to_terraform.py`, covering the happy path, each supported input format, and every error branch. CI fails under 95% coverage, and the current code is at 100%. Please keep it there.
 4. **Docs.** Add the endpoint to `docs/reference/api.md` and its rules to `docs/reference/conversion-rules.md`. Keep `README.md` to the overview and quick start.
 
-## Adding a new utility (Phase 2)
+## Adding a new service
 
-Utilities (Base64, JWT decode, cron explain, hashing) will live in a separate `utility-api` service:
-
-1. Create the module in `services/utility-api/tools/`.
-2. Add the endpoint in `services/utility-api/main.py`.
-3. Add a frontend template if the tool needs one.
-4. Write tests.
-
-A new service also needs its own `k8s/<service>/` manifests that follow the `converter-api` pattern: probes, resource limits, non-root security context.
+A new service (for example the planned web frontend) needs its own `k8s/<service>/` manifests that follow the `converter-api` pattern: probes, resource limits, non-root security context.
 
 ## Code style
 
