@@ -2,7 +2,7 @@
 
 DevToolkit focuses on converters that are **rare or don't exist yet**. Tools that already exist in many places (Base64, JWT decoders, cron explainers and the like) are deliberately left out.
 
-Features are listed in priority order and tracked on the project's GitHub Projects board. Dates are targets, not promises.
+Features are listed in priority order and tracked on the [DevToolkit roadmap board](https://github.com/users/zainsohail88/projects/2/views/3). Dates are targets, not promises.
 
 ## Timeline
 
