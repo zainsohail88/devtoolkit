@@ -1,5 +1,9 @@
-# Weekly update PRs. Minor and patch bumps are grouped into one PR per ecosystem to keep
-# the noise down; major versions get their own PR so breaking changes are reviewed alone.
+# Dependabot opens two kinds of PRs:
+# - Version updates (weekly): minor and patch bumps are grouped into one PR per ecosystem;
+#   major versions get their own PR so breaking changes are reviewed alone.
+# - Security updates (as soon as an alert has a fix): all fixes for an ecosystem are grouped
+#   into one PR. This replaces the "Grouped security updates" toggle in Settings, which
+#   GitHub disables when this file exists.
 version: 2
 updates:
   - package-ecosystem: pip
@@ -8,7 +12,11 @@ updates:
       interval: weekly
     groups:
       python-minor-patch:
+        applies-to: version-updates
         update-types: [minor, patch]
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: /
@@ -16,9 +24,17 @@ updates:
       interval: weekly
     groups:
       actions-minor-patch:
+        applies-to: version-updates
         update-types: [minor, patch]
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: docker
     directory: /services/converter-api
     schedule:
       interval: weekly
+    groups:
+      docker-security:
+        applies-to: security-updates
+        patterns: ["*"]
