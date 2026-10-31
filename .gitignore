@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*-key.json
+credentials.json
+
+# Docker
+docker-compose.override.yaml
+docker-compose.override.yml
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,7 @@
+# Code owners are automatically requested for review on PRs touching their paths.
+# With "Require review from Code Owners" turned on in the main ruleset, these paths
+# can't merge without the owner's approval (or the owner's admin bypass).
+#
+# .github/ holds the workflows, Dependabot config and this file, so it controls what
+# runs in CI with access to secrets and packages. Only the repo owner may change it.
+/.github/ @zainsohail88

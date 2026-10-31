@@ -1,0 +1,97 @@
+name: Deploy to GKE (production)
+
+# Manual only: Actions tab -> "Deploy to GKE (production)" -> Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Full commit SHA of the image to deploy (empty = latest commit that changed services/)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write # lets GitHub request a short-lived token from Google (Workload Identity)
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Add protection rules (e.g. required reviewers) under Settings -> Environments -> production.
+    environment: production
+    steps:
+      # The manifests applied below come from the branch this run is started on, so only
+      # reviewed code on main may reach production.
+      - name: Only deploy from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Production deploys must run on main (this run is on ${GITHUB_REF})."
+          exit 1
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Work out image
+        id: image
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          # Images are only built for commits that change services/, so by default pick the
+          # newest such commit. A k8s/- or docs-only commit has no image of its own.
+          tag="${INPUT_TAG:-$(git log -1 --format=%H -- services/)}"
+          if ! [[ "$tag" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::image_tag must be a full 40-character commit SHA, got '$tag'"
+            exit 1
+          fi
+          # Only commits that reached main (reviewed, CI passed) may be deployed.
+          if ! git merge-base --is-ancestor "$tag" HEAD 2>/dev/null; then
+            echo "::error::Commit $tag is not on main. Only commits merged to main can be deployed."
+            exit 1
+          fi
+          echo "Deploying image for commit $tag"
+          echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}/converter-api:${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the image exists
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          if ! docker manifest inspect "$IMAGE_REF" > /dev/null; then
+            echo "::error::No image $IMAGE_REF. Its CI run may have failed, or it was never built on main."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (Workload Identity, no keys)
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@64bc7249bbcf78056bb92f14d3cedc2da193946c # v2.3.5
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          cluster_name: ${{ vars.GKE_CLUSTER }}
+          location: ${{ vars.GKE_LOCATION }}
+
+      - name: Pin the image in the manifest
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          # Swap the ':latest' image for the chosen SHA so there is exactly one rollout.
+          sed -i -E "s#^( *image: ).*/converter-api:.*#\1${IMAGE_REF}#" k8s/converter-api/deployment.yaml
+          grep -n "image:" k8s/converter-api/deployment.yaml
+          grep -q "image: ${IMAGE_REF}" k8s/converter-api/deployment.yaml
+
+      - name: Apply manifests and wait for rollout
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/converter-api/
+          kubectl -n devtoolkit rollout status deployment/converter-api --timeout=180s
+
+      - name: Show result
+        if: always()
+        run: kubectl -n devtoolkit get deployment,pods,service -l app.kubernetes.io/name=converter-api

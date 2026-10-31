@@ -1,0 +1,86 @@
+name: Build and push images
+
+# Not triggered by pushes directly. ci.yaml calls this only after every check has passed
+# on main, so a broken commit never gets an image (or overwrites :latest). It can also be
+# run by hand, but only on main: images from other branches would skip CI and review.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-push-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  converter-api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only build from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Images are only built from main (this run is on ${GITHUB_REF})."
+          exit 1
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Did services/ change?
+        id: changes
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # Manual runs always build. On a push, build only if services/** changed.
+          if [[ "$GITHUB_EVENT_NAME" != "push" ]] \
+            || [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]] \
+            || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null \
+            || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- services/; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "No changes under services/, skipping image build."
+          fi
+
+      - name: Image tags
+        if: steps.changes.outputs.build == 'true'
+        id: image
+        run: |
+          name="ghcr.io/${GITHUB_REPOSITORY,,}/converter-api"  # registry paths must be lowercase
+          tags="${name}:${GITHUB_SHA}"
+          # CI runs for consecutive commits can finish out of order. Only move :latest if this
+          # commit is still the tip of main, so an older build never overwrites a newer one.
+          # (Publish runs are serialised by the concurrency group, so check-then-push is safe.)
+          git fetch --quiet origin main
+          if [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]; then
+            tags="${tags},${name}:latest"
+          else
+            echo "main has moved past ${GITHUB_SHA}; pushing the SHA tag only."
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - if: steps.changes.outputs.build == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - if: steps.changes.outputs.build == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - if: steps.changes.outputs.build == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: services/converter-api
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

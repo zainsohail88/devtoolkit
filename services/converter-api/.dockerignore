@@ -1,0 +1,9 @@
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+requirements-dev.txt
+pyproject.toml

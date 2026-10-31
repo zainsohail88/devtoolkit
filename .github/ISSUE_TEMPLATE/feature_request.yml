@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest a new converter, tool or conversion rule
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the task you're trying to do today and what makes it hard.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like?
+      description: For a conversion rule, show an example input and the output you'd expect.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered

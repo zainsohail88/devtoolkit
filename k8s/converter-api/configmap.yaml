@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: converter-api-config
+  namespace: devtoolkit
+  labels:
+    app.kubernetes.io/name: converter-api
+    app.kubernetes.io/part-of: devtoolkit
+data:
+  LOG_LEVEL: info
