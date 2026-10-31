@@ -4,14 +4,52 @@ Practical DevOps conversion tools, built as microservices on Kubernetes.
 
 DevToolkit has two jobs:
 
-1. **Be useful.** Tools DevOps engineers reach for every day, starting with a docker-compose to Kubernetes converter.
+1. **Be useful.** Tools DevOps engineers reach for every day, starting with a Docker Compose to Kubernetes converter.
 2. **Be a clean example.** Raw Kubernetes manifests (no Helm yet), health probes, resource limits, non-root containers and a full CI/CD pipeline, all small enough to read in one sitting.
 
-> **Status:** Phase 1 is done: `converter-api` is built, tested and ready to deploy. Next up are `utility-api` and a web frontend. See the [roadmap](docs/roadmap.md).
+## Quick start
 
-## What it does
+#### Requirements
 
-Send a `docker-compose.yaml` and get back Kubernetes Deployments and Services, plus notes on anything that needs a human decision.
+| Tool | Minimum version | Needed for |
+|------|-----------------|------------|
+| [Python](https://www.python.org/) | 3.13 | Dev Mode |
+| [GNU Make](https://www.gnu.org/software/make/) | 3.81 | Dev Mode, Kubernetes Mode |
+| [Docker](https://docs.docker.com/get-docker/) | Any current release | Kubernetes Mode (builds the image; kind runs on it) |
+| [kind](https://kind.sigs.k8s.io/) | v0.33.0 (pinned in [`.tool-versions`](.tool-versions)) | Kubernetes Mode |
+| [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.36 (cluster runs Kubernetes 1.37) | Kubernetes Mode |
+| [jq](https://jqlang.org/) | 1.5 | Only the [example](#example) below |
+
+#### Dev Mode
+
+Runs the API directly with Python and reloads on every code change.
+
+```bash
+make install                 # create .venv and install dependencies
+make test                    # run the tests with coverage
+make run                     # start the API on http://localhost:8000 (docs at /docs)
+```
+
+#### Kubernetes Mode
+
+Builds the image and runs it on a local kind cluster, using the same manifests as production.
+
+```bash
+make deploy-local            # create the kind cluster if needed, build the image, deploy k8s/
+make port-forward            # forward localhost:8000 to the service (keep it running)
+curl localhost:8000/health   # in a second terminal: check the API responds
+make cluster-down            # delete the cluster when you're done
+```
+
+#### All Commands
+
+```bash
+make help                    # list every make target with a short description
+```
+
+## Example
+
+Send a Docker Compose file and get back Kubernetes Deployments and Services, plus notes on anything that needs a human decision. With the API running in either mode:
 
 ```bash
 curl -s localhost:8000/convert/compose-to-k8s/yaml \
@@ -34,30 +72,8 @@ kind: Service
   - name: tcp-8080
     port: 8080
     targetPort: 80
+    protocol: TCP
 ```
-
-## Quick start
-
-**Requirements:** Python 3.13 and Docker. For Kubernetes, also [kind](https://kind.sigs.k8s.io/) (version in [`.tool-versions`](.tool-versions)) and `kubectl`.
-
-### Develop: run the app directly (fastest)
-
-```bash
-make install   # creates .venv and installs dependencies
-make test      # runs tests with coverage
-make run       # http://localhost:8000/docs for interactive API docs
-```
-
-### Run it on Kubernetes (kind)
-
-```bash
-make deploy-local   # creates the kind cluster if needed, builds the image, deploys k8s/
-make port-forward   # then in another terminal:
-curl localhost:8000/health
-make cluster-down   # delete the cluster when you're done
-```
-
-`make help` lists every command.
 
 ## Documentation
 
@@ -70,11 +86,3 @@ make cluster-down   # delete the cluster when you're done
 | [Deploying to your cluster](docs/operations/deploy.md) | Run it on any Kubernetes cluster |
 | [Configuration](docs/configuration.md) | Environment variables |
 | [Roadmap](docs/roadmap.md) | Phases, future plans, out of scope |
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Found a security problem? See [SECURITY.md](SECURITY.md).
-
-## License
-
-[MIT](LICENSE)
