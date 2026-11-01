@@ -45,6 +45,6 @@ The `devtoolkit` namespace enforces the `restricted` [Pod Security Standard](htt
 `services/converter-api/Dockerfile` has two stages:
 
 1. **builder** installs dependencies into a virtualenv.
-2. **runtime** copies only the virtualenv and the app code onto `python:3.13-slim` and runs as UID 10001. It has a Docker `HEALTHCHECK` for plain `docker run`; Kubernetes uses its own probes instead.
+2. **runtime** copies only the virtualenv and the app code onto the official slim Python image (the exact version is set in the Dockerfile and kept current by Dependabot) and runs as UID 10001. It has a Docker `HEALTHCHECK` for plain `docker run`; Kubernetes uses its own probes instead.
 
 Images are published to GitHub Container Registry, tagged with the commit SHA and `latest`. The image name is set once, in `k8s/converter-api/deployment.yaml`; scripts and CI read it from there. See [CI/CD](operations/ci-cd.md).

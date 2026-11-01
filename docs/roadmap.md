@@ -1,24 +1,65 @@
 # Roadmap
 
-## Phase 1: converter and platform (done)
+DevToolkit focuses on converters that are **rare or don't exist yet**. Tools that already exist in many places (Base64, JWT decoders, cron explainers and the like) are deliberately left out.
 
-- [x] `converter-api` (FastAPI): docker-compose to Kubernetes, YAML validation
-- [x] Raw Kubernetes manifests: probes, resource limits, non-root, restricted Pod Security
-- [x] CI: lint, tests with a coverage gate, Docker build, manifest validation
-- [x] Image publishing to GitHub Container Registry
-- [x] Manual, keyless production deploy workflow (planned for Phase 2, done early)
-- [x] Dependabot, CodeQL, SHA-pinned actions
+Features are listed in priority order and tracked on the [DevToolkit roadmap board](https://github.com/users/zainsohail88/projects/2/views/3). Dates are targets, not promises.
 
-## Phase 2: more tools and a web frontend
+## Timeline
 
-- [ ] `utility-api` service: `/base64/encode`, `/base64/decode`, `/jwt/decode`, `/cron/explain`, `/hash`, following the same Kubernetes manifest pattern as `converter-api`
-- [ ] Web frontend (Flask + Jinja2, Tailwind CSS) for people who don't use the CLI. It calls the APIs server-side, and is server-rendered so search engines can index it.
-- [ ] Production Kubernetes config: Ingress and TLS, so the service is reachable from the internet
+```mermaid
+gantt
+    title DevToolkit roadmap (2027)
+    dateFormat YYYY-MM-DD
+    axisFormat %b %Y
 
-## Later
+    section Q1 2027
+    AWS to Terraform                 :t1, 2027-01-01, 2027-02-14
+    Two-way CI converter             :t2, 2027-02-15, 2027-03-31
 
-- [ ] More converters, starting with CloudFormation to Terraform
-- [ ] Public hosted version, ad-supported
+    section Q2 2027
+    Web frontend                     :t3, 2027-04-01, 2027-05-15
+    K8s to Compose                   :t4, 2027-05-16, 2027-06-30
+
+    section Q3 2027
+    Compose/K8s with ECS             :t5, 2027-07-01, 2027-08-15
+    nginx.conf to Gateway API        :t6, 2027-08-16, 2027-09-30
+
+    section Q4 2027
+    Firewall rules translator        :t7, 2027-10-01, 2027-11-15
+    Prometheus alerts                :t8, 2027-11-16, 2027-12-31
+```
+
+## Planned
+
+| # | Feature | What it does | Why it's needed |
+|---|---------|--------------|-----------------|
+| 1 | **AWS → Terraform** | CloudFormation (JSON/YAML), AWS SAM and AWS CDK (via `cdk synth` output) → Terraform | Only one CloudFormation converter exists, and none for CDK |
+| 2 | **Two-way CI converter** | Any direction between GitHub Actions, GitLab CI, CircleCI, Jenkins (declarative) and Azure Pipelines | Existing tools convert one way only, into GitHub Actions |
+| 3 | **Web frontend** | Hosted web app with every converter, served over HTTPS | Lets anyone use DevToolkit without running it |
+| 4 | **Kubernetes → Docker Compose** | Deployments, Services, ConfigMaps → Compose services | No maintained tool goes this direction |
+| 5 | **Compose / Kubernetes ↔ AWS ECS** | Both directions between Compose, Kubernetes and ECS task definitions | Existing tools are stale or only partly cover Compose |
+| 6 | **nginx.conf → Gateway API** | `server`/`location`/`proxy_pass` → `Gateway` + `HTTPRoute` | Existing tools start from Kubernetes Ingress, not raw nginx config |
+| 7 | **Firewall rules translator** | Any direction between AWS Security Groups, GCP firewall rules, Azure NSGs and Kubernetes NetworkPolicy | No tool covers GCP or NetworkPolicy |
+| 8 | **Prometheus alerts → Datadog / CloudWatch** | Prometheus alerting rules → Datadog monitors and CloudWatch alarms | No converter targets Datadog or CloudWatch |
+
+Every converter follows the same rule as the existing one: anything it can't convert exactly is reported in `notes`, never silently dropped or guessed.
+
+## Not yet scheduled
+
+- Ad-supported public hosting, from the original project vision. Revisit after the web frontend (priority 3) is live.
+
+## Done
+
+- `converter-api` (FastAPI): Docker Compose to Kubernetes, YAML validation
+- Raw Kubernetes manifests: probes, resource limits, non-root, restricted Pod Security
+- CI: lint, tests with a 95% coverage gate, Docker build, manifest validation, end-to-end deploy on kind
+- Image publishing to GitHub Container Registry
+- Manual, keyless production deploy workflow
+- Dependabot, CodeQL, SHA-pinned actions
+
+## Dropped
+
+- **`utility-api`** (Base64, JWT decode, cron explain, hashing). These tools are already widely available, so building them would add clutter rather than value.
 
 ## Out of scope
 
