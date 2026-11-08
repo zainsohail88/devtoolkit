@@ -81,6 +81,37 @@ _ComposeLoader.yaml_implicit_resolvers = {
     for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
 
+
+def _load_yaml(text: str, loader_class: type[yaml.SafeLoader]) -> Any:
+    """Build the single document in `text` with one of the safe loaders above.
+
+    This is what yaml.load() does internally, spelled out so the loader is visibly a
+    SafeLoader subclass: it can only build the standard YAML types (mappings, lists,
+    strings, numbers, booleans, null), never arbitrary Python objects.
+    """
+    loader = loader_class(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
+def load_yaml_documents(text: str) -> list[Any]:
+    """Build every document in a multi-document YAML string (separated by ---).
+
+    Uses SafeMergeLoader: safe types only, and linear-time `<<` merges. Raises yaml.YAMLError
+    on syntax errors.
+    """
+    loader = SafeMergeLoader(text)
+    try:
+        documents: list[Any] = []
+        while loader.check_data():
+            documents.append(loader.get_data())
+        return documents
+    finally:
+        loader.dispose()
+
+
 # Compose memory units -> K8s binary suffixes. Docker treats these as powers of 1024.
 _MEMORY_UNITS = {
     "b": "",
@@ -91,11 +122,21 @@ _MEMORY_UNITS = {
     "g": "Gi",
     "gb": "Gi",
 }
-_MEMORY_PATTERN = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z]*)\s*$")
+# Applied to a stripped value. No two adjacent repetitions can match the same character, so
+# matching stays linear however long the input is.
+_MEMORY_PATTERN = re.compile(r"^([0-9]+(?:\.[0-9]+)?)[ \t]*([a-zA-Z]*)$")
 
 
 class ComposeError(ValueError):
-    """Raised when the compose input cannot be parsed or converted."""
+    """Raised when the compose input cannot be parsed or converted.
+
+    `message` is written for the user and is safe to send back to them: it describes their
+    input and never includes internal details.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
 
 def parse_compose(yaml_string: str) -> dict[str, Any]:
@@ -109,9 +150,11 @@ def parse_compose(yaml_string: str) -> dict[str, Any]:
 
     try:
         check_yaml_limits(yaml_string)
-        data = yaml.load(yaml_string, Loader=_ComposeLoader)  # noqa: S506 - SafeLoader subclass
+        data = _load_yaml(yaml_string, _ComposeLoader)
     except yaml.YAMLError as exc:
-        problem = getattr(exc, "problem", None) or str(exc)
+        # `problem` is the parser's description of the input ("mapping values are not
+        # allowed here"). Nothing else from the exception reaches the user.
+        problem = getattr(exc, "problem", None) or "syntax error"
         raise ComposeError(f"Invalid YAML: {problem}") from exc
 
     check_node_count(data)
@@ -308,7 +351,7 @@ def convert_memory(value: Any) -> str:
 
     '512M' -> '512Mi', '1g' -> '1Gi', 268435456 (bytes) -> '256Mi'.
     """
-    match = _MEMORY_PATTERN.match(str(value))
+    match = _MEMORY_PATTERN.match(str(value).strip())
     if not match:
         raise ComposeError(f"Invalid memory value: '{value}'")
     number, unit = match.groups()

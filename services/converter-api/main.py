@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field
 
 from converters.compose_to_k8s import (
     ComposeError,
-    SafeMergeLoader,
     check_yaml_limits,
     convert_compose_to_k8s,
+    load_yaml_documents,
     manifests_to_yaml,
     parse_compose,
 )
@@ -97,7 +97,7 @@ def convert_compose(request: ConvertRequest) -> dict[str, Any] | JSONResponse:
         result = _convert(request)
     except ComposeError as exc:
         logger.info("conversion rejected: %s", exc)
-        return _error(str(exc))
+        return _error(exc.message)
     return {"success": True, "manifests": result["manifests"], "notes": result["notes"]}
 
 
@@ -108,7 +108,7 @@ def convert_compose_yaml(request: ConvertRequest) -> dict[str, Any] | JSONRespon
         result = _convert(request)
     except ComposeError as exc:
         logger.info("conversion rejected: %s", exc)
-        return _error(str(exc))
+        return _error(exc.message)
     return {
         "success": True,
         "yaml": manifests_to_yaml(result["manifests"]),
@@ -122,11 +122,12 @@ def validate_yaml(request: ValidateRequest) -> dict[str, Any]:
     try:
         check_yaml_limits(request.yaml)
         # Safe loader with linear-time `<<` merges (plain safe_load_all is exponential).
-        documents = list(yaml.load_all(request.yaml, Loader=SafeMergeLoader))  # noqa: S506
+        documents = load_yaml_documents(request.yaml)
     except ComposeError as exc:
-        return {"valid": False, "error": str(exc)}
+        return {"valid": False, "error": exc.message}
     except yaml.YAMLError as exc:
-        problem = getattr(exc, "problem", None) or str(exc)
+        # Only the parser's description of the input is returned, never the exception text.
+        problem = getattr(exc, "problem", None) or "syntax error"
         mark = getattr(exc, "problem_mark", None)
         response: dict[str, Any] = {"valid": False, "error": f"Invalid YAML: {problem}"}
         if mark is not None:
