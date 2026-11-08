@@ -1,10 +1,5 @@
 name: Deploy to Cloud Run
 
-# The maintainers' public deployment. Runs automatically from ci.yaml after an image for a
-# new commit on main is published, and can be run by hand (on main) to redeploy or roll back.
-# Skipped entirely until the repository variables below are set, so forks are unaffected:
-#   GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT,
-#   CLOUD_RUN_SERVICE, CLOUD_RUN_REGION, CLOUD_RUN_SERVICE_ACCOUNT
 on:
   workflow_call:
     inputs:

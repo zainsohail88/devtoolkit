@@ -156,8 +156,6 @@ jobs:
       packages: write
     uses: ./.github/workflows/build-push.yaml
 
-  # Deploys each newly published image to Cloud Run. Skipped when no image was built
-  # (no changes under services/) or the Cloud Run repository variables aren't set.
   deploy:
     needs: publish
     if: needs.publish.outputs.built == 'true' && vars.CLOUD_RUN_SERVICE != ''
