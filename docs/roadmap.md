@@ -17,16 +17,15 @@ gantt
     Two-way CI converter             :t2, 2027-02-15, 2027-03-31
 
     section Q2 2027
-    Web frontend                     :t3, 2027-04-01, 2027-05-15
-    K8s to Compose                   :t4, 2027-05-16, 2027-06-30
+    K8s to Compose                   :t3, 2027-04-01, 2027-05-15
 
     section Q3 2027
-    Compose/K8s with ECS             :t5, 2027-07-01, 2027-08-15
-    nginx.conf to Gateway API        :t6, 2027-08-16, 2027-09-30
+    Compose/K8s with ECS             :t4, 2027-07-01, 2027-08-15
+    nginx.conf to Gateway API        :t5, 2027-08-16, 2027-09-30
 
     section Q4 2027
-    Firewall rules translator        :t7, 2027-10-01, 2027-11-15
-    Prometheus alerts                :t8, 2027-11-16, 2027-12-31
+    Firewall rules translator        :t6, 2027-10-01, 2027-11-15
+    Prometheus alerts                :t7, 2027-11-16, 2027-12-31
 ```
 
 ## Planned
@@ -35,26 +34,25 @@ gantt
 |---|---------|--------------|-----------------|
 | 1 | **AWS → Terraform** | CloudFormation (JSON/YAML), AWS SAM and AWS CDK (via `cdk synth` output) → Terraform | Only one CloudFormation converter exists, and none for CDK |
 | 2 | **Two-way CI converter** | Any direction between GitHub Actions, GitLab CI, CircleCI, Jenkins (declarative) and Azure Pipelines | Existing tools convert one way only, into GitHub Actions |
-| 3 | **Web frontend** | Hosted web app with every converter, served over HTTPS | Lets anyone use DevToolkit without running it |
-| 4 | **Kubernetes → Docker Compose** | Deployments, Services, ConfigMaps → Compose services | No maintained tool goes this direction |
-| 5 | **Compose / Kubernetes ↔ AWS ECS** | Both directions between Compose, Kubernetes and ECS task definitions | Existing tools are stale or only partly cover Compose |
-| 6 | **nginx.conf → Gateway API** | `server`/`location`/`proxy_pass` → `Gateway` + `HTTPRoute` | Existing tools start from Kubernetes Ingress, not raw nginx config |
-| 7 | **Firewall rules translator** | Any direction between AWS Security Groups, GCP firewall rules, Azure NSGs and Kubernetes NetworkPolicy | No tool covers GCP or NetworkPolicy |
-| 8 | **Prometheus alerts → Datadog / CloudWatch** | Prometheus alerting rules → Datadog monitors and CloudWatch alarms | No converter targets Datadog or CloudWatch |
+| 3 | **Kubernetes → Docker Compose** | Deployments, Services, ConfigMaps → Compose services | No maintained tool goes this direction |
+| 4 | **Compose / Kubernetes ↔ AWS ECS** | Both directions between Compose, Kubernetes and ECS task definitions | Existing tools are stale or only partly cover Compose |
+| 5 | **nginx.conf → Gateway API** | `server`/`location`/`proxy_pass` → `Gateway` + `HTTPRoute` | Existing tools start from Kubernetes Ingress, not raw nginx config |
+| 6 | **Firewall rules translator** | Any direction between AWS Security Groups, GCP firewall rules, Azure NSGs and Kubernetes NetworkPolicy | No tool covers GCP or NetworkPolicy |
+| 7 | **Prometheus alerts → Datadog / CloudWatch** | Prometheus alerting rules → Datadog monitors and CloudWatch alarms | No converter targets Datadog or CloudWatch |
 
-Every converter follows the same rule as the existing one: anything it can't convert exactly is reported in `notes`, never silently dropped or guessed.
+Every converter follows the same rule as the existing one: anything it can't convert exactly is reported in `notes`, never silently dropped or guessed. Each one gets a page in the web UI as well as an API endpoint.
 
 ## Not yet scheduled
 
-- Ad-supported public hosting, from the original project vision. Revisit after the web frontend (priority 3) is live.
+- Ad-supported public hosting, from the original project vision. Revisit once the web UI has been live for a while.
 
 ## Done
 
 - `converter-api` (FastAPI): Docker Compose to Kubernetes, YAML validation
-- Raw Kubernetes manifests: probes, resource limits, non-root, restricted Pod Security
-- CI: lint, tests with a 95% coverage gate, Docker build, manifest validation, end-to-end deploy on kind
-- Image publishing to GitHub Container Registry
-- Manual, keyless production deploy workflow
+- `web` (FastAPI + Jinja2 + Tailwind): a page per tool, calls the API server-side; the API is reachable from `web` only
+- Raw Kubernetes manifests: probes, resource limits, non-root, restricted Pod Security, NetworkPolicy
+- CI: lint, tests with a 95% coverage gate, Docker builds, manifest validation, end-to-end on kind including the NetworkPolicy
+- Image publishing to GitHub Container Registry, one image per service
 - Dependabot, CodeQL, SHA-pinned actions
 
 ## Dropped

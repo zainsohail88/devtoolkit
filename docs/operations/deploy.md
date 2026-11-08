@@ -5,6 +5,7 @@ The manifests in `k8s/` work on any conformant Kubernetes cluster: a local one, 
 ## Requirements
 
 - Kubernetes **1.25 or newer**. The `devtoolkit` namespace uses Pod Security admission, which is built in from 1.25.
+- A CNI that enforces NetworkPolicy, if you want `converter-api` to be reachable from `web` only. kind's default (kindnet), Calico, Cilium and GKE Dataplane V2 do. Without one the policy is accepted but has no effect.
 - `kubectl` pointed at the cluster you want, with permission to create a namespace.
 - Nodes able to pull from `ghcr.io`.
 
@@ -14,40 +15,41 @@ The manifests in `k8s/` work on any conformant Kubernetes cluster: a local one, 
 git clone https://github.com/zainsohail88/devtoolkit.git
 cd devtoolkit
 kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/converter-api/
-kubectl -n devtoolkit rollout status deployment/converter-api
+kubectl apply -f k8s/converter-api/ -f k8s/web/
+kubectl -n devtoolkit rollout status deployment/converter-api deployment/web
 ```
 
 This creates:
 
 - the `devtoolkit` namespace
-- the `converter-api` Deployment (2 replicas)
-- a ClusterIP Service on port 8000
-- a ConfigMap
+- the `converter-api` and `web` Deployments (2 replicas each)
+- a ClusterIP Service for each: `converter-api` on port 8000, `web` on port 8080
+- a ConfigMap for each
+- a NetworkPolicy that lets only `web` pods reach `converter-api`
 
 ## Pin a version
 
-The manifest uses the `:latest` image. For anything you care about, pin an exact build: every commit on `main` that changed the service has an image tagged with its full commit SHA.
+The manifests use the `:latest` images. For anything you care about, pin exact builds: every commit on `main` that changed a service has an image tagged with its full commit SHA.
 
 Pin it in the manifest itself, before applying, so a later `kubectl apply` keeps the version:
 
 ```bash
 sed -i 's#/converter-api:latest#/converter-api:<commit-sha>#' k8s/converter-api/deployment.yaml
-kubectl apply -f k8s/converter-api/
+sed -i 's#/web:latest#/web:<commit-sha>#' k8s/web/deployment.yaml
+kubectl apply -f k8s/converter-api/ -f k8s/web/
 ```
 
 (`kubectl set image` also works, but the next `kubectl apply` of the unedited manifest silently switches back to `:latest`.)
 
 ## Try it
 
-The Service is internal to the cluster (ClusterIP). To reach it from your machine:
+The Services are internal to the cluster (ClusterIP). To use the web UI from your machine:
 
 ```bash
-kubectl -n devtoolkit port-forward svc/converter-api 8000:8000
-curl localhost:8000/health
+kubectl -n devtoolkit port-forward svc/web 8080:8080
 ```
 
-Public access through Ingress/Gateway with TLS is planned. See the [roadmap](../roadmap.md).
+Then open http://localhost:8080. Public access through Ingress/Gateway with TLS is up to your cluster; point it at the `web` Service only.
 
 ## Configure
 

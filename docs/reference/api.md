@@ -2,6 +2,8 @@
 
 While the service is running, interactive docs (Swagger UI) are served at `/docs`, e.g. http://localhost:8000/docs.
 
+The `web` service calls these endpoints from the server side. In the cluster, a NetworkPolicy allows only `web` pods to reach the API; in the hosted version, the API requires authentication and only `web` is allowed to call it. To use the API directly, run it yourself (`make run`).
+
 ## Endpoints
 
 | Method | Path | What it does |
