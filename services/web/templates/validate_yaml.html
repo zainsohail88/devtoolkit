@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}YAML validator · DevToolkit{% endblock %}
+{% block description %}Check YAML syntax and find the line and column of the first error.{% endblock %}
+{% block content %}
+<h1 class="text-step-2 font-semibold">YAML validator</h1>
+<p class="mt-2 max-w-measure text-ink-muted">Checks syntax only. Multi-document files (separated by <code class="font-mono">---</code>) are supported.</p>
+
+{% include "_messages.html" %}
+
+<form method="post" action="/validate-yaml" enctype="multipart/form-data" class="mt-6 grid gap-4">
+  <label class="grid gap-1">
+    <span class="text-small font-medium">YAML</span>
+    <textarea name="yaml_text" rows="16" spellcheck="false" required class="field font-mono">{{ yaml_text }}</textarea>
+  </label>
+  <label class="inline-flex min-h-11 flex-wrap items-center gap-2 text-small">
+    <span class="font-medium">Or upload a file</span>
+    <input type="file" name="yaml_file" accept=".yaml,.yml,text/yaml,application/yaml">
+  </label>
+  <div>
+    <button type="submit" class="btn btn-primary">Validate</button>
+  </div>
+</form>
+
+{% if validation is defined %}
+<section class="mt-8" role="status">
+  {% if validation.valid %}
+  <div class="alert alert-success">
+    Valid YAML: {{ validation.documents }} document{{ '' if validation.documents == 1 else 's' }}.
+  </div>
+  {% else %}
+  <div class="alert alert-error">
+    {{ validation.error }}{% if validation.line is defined %} (line {{ validation.line }}, column {{ validation.column }}){% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

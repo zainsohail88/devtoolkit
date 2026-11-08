@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-step-3 font-semibold">DevOps conversion tools</h1>
+<p class="mt-2 max-w-measure text-ink-muted">Paste a file, get the converted output. Nothing is stored.</p>
+
+<div class="mt-8 grid gap-4 sm:grid-cols-2">
+  <a href="/compose-to-k8s" class="card">
+    <h2 class="text-step-1 font-semibold">Docker Compose → Kubernetes</h2>
+    <p class="mt-1 text-small text-ink-muted">Turns a compose file into Deployments and Services, with notes on anything that needs a human decision.</p>
+  </a>
+  <a href="/validate-yaml" class="card">
+    <h2 class="text-step-1 font-semibold">YAML validator</h2>
+    <p class="mt-1 text-small text-ink-muted">Checks syntax and reports the line and column of the first error. Multi-document files are supported.</p>
+  </a>
+</div>
+{% endblock %}

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}DevToolkit{% endblock %}</title>
+  <meta name="description" content="{% block description %}DevOps conversion tools: Docker Compose to Kubernetes, YAML validation.{% endblock %}">
+  <script>{{ theme_script|safe }}</script>
+  <link rel="stylesheet" href="{{ static_url('app.css') }}">
+</head>
+<body class="min-h-screen bg-surface font-sans text-step-0 text-ink">
+  <a href="#main" class="skip-link">Skip to content</a>
+  <header class="border-b border-divider bg-surface-raised">
+    <nav aria-label="Main" class="mx-auto flex max-w-measure-wide flex-wrap items-center gap-x-6 px-4">
+      <a href="/" class="inline-flex min-h-11 items-center font-semibold">DevToolkit</a>
+      <a href="/compose-to-k8s" class="nav-link"{% if request.url.path == '/compose-to-k8s' %} aria-current="page"{% endif %}>Compose → Kubernetes</a>
+      <a href="/validate-yaml" class="nav-link"{% if request.url.path == '/validate-yaml' %} aria-current="page"{% endif %}>YAML validator</a>
+      <div class="ml-auto flex items-center gap-4">
+        <a href="https://github.com/zainsohail88/devtoolkit" class="nav-link">GitHub</a>
+        <button type="button" class="btn btn-secondary text-small" data-theme-toggle hidden>Theme</button>
+      </div>
+    </nav>
+  </header>
+  <main id="main" class="mx-auto max-w-measure-wide px-4 py-8">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="mx-auto max-w-measure-wide px-4 py-8 text-small text-ink-muted">
+    Open source, MIT licensed. Inputs are processed in memory and not stored.
+  </footer>
+  <script src="{{ static_url('app.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# Only the web pods may call converter-api. Everything else in the cluster is refused.
+# Needs a CNI that enforces NetworkPolicy: kind's default (kindnet) does, as do Calico,
+# Cilium and GKE Dataplane V2. The CI e2e job checks that the policy is enforced.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: converter-api
+  namespace: devtoolkit
+  labels:
+    app.kubernetes.io/name: converter-api
+    app.kubernetes.io/part-of: devtoolkit
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: converter-api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web
+      ports:
+        - port: http
+          protocol: TCP

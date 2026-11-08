@@ -11,72 +11,94 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Cancel superseded PR runs, but let every main run finish so its image gets published.
+  # Cancel superseded PR runs, but let every main run finish so its images get published.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   PYTHON_VERSION: "3.13"
   KUBECONFORM_VERSION: "v0.7.0"
-  SERVICE_DIR: services/converter-api
+  # Every service under services/ (and k8s/). Jobs loop over this list, so the check names
+  # the branch ruleset requires stay the same when a service is added.
+  SERVICES: converter-api web
 
 jobs:
   lint:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ env.SERVICE_DIR }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: ${{ env.SERVICE_DIR }}/requirements-dev.txt
-      - run: pip install -r requirements-dev.txt
-      - name: ruff check
-        run: ruff check .
-      - name: ruff format
-        run: ruff format --check .
+          cache-dependency-path: services/*/requirements-dev.txt
+      - name: Install dev dependencies
+        run: pip install $(printf -- '-r services/%s/requirements-dev.txt ' $SERVICES)
+      - name: ruff check and format
+        run: |
+          for service in $SERVICES; do
+            echo "== $service"
+            (cd "services/$service" && ruff check . && ruff format --check .)
+          done
 
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ env.SERVICE_DIR }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: ${{ env.SERVICE_DIR }}/requirements-dev.txt
-      - run: pip install -r requirements-dev.txt
+          cache-dependency-path: services/*/requirements-dev.txt
+      - name: Install dev dependencies
+        run: pip install $(printf -- '-r services/%s/requirements-dev.txt ' $SERVICES)
       - name: pytest with coverage
-        run: pytest --cov --cov-report=term-missing --cov-fail-under=95
+        run: |
+          for service in $SERVICES; do
+            echo "== $service"
+            (cd "services/$service" && pytest --cov --cov-report=term-missing --cov-fail-under=95)
+          done
 
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: docker build (no push)
+      - name: docker build converter-api (no push)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: ${{ env.SERVICE_DIR }}
+          context: services/converter-api
           push: false
           load: true
           tags: converter-api:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Smoke test the container
+          cache-from: type=gha,scope=converter-api
+          cache-to: type=gha,mode=max,scope=converter-api
+      - name: docker build web (no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: services/web
+          push: false
+          load: true
+          tags: web:ci
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+      # Both containers on one network, like the two Services in the cluster. A conversion
+      # through the UI proves web can reach converter-api.
+      - name: Smoke test the containers
         run: |
-          docker run -d --name converter-api -p 8000:8000 converter-api:ci
-          for i in $(seq 1 20); do
-            curl -fsS http://localhost:8000/health && exit 0
-            sleep 1
-          done
-          docker logs converter-api
-          exit 1
+          docker network create ci
+          docker run -d --name converter-api --network ci converter-api:ci
+          docker run -d --name web --network ci -p 8080:8080 \
+            -e CONVERTER_API_URL=http://converter-api:8000 web:ci
+          for i in $(seq 1 20); do curl -fsS localhost:8080/health && break; sleep 1; done
+          curl -fsS localhost:8080/ready
+          curl -fsS localhost:8080/ | grep -q 'href="/compose-to-k8s"'
+          curl -fsS -F compose_yaml=$'services:\n  app:\n    image: nginx\n    ports: ["80"]' \
+            localhost:8080/compose-to-k8s | grep -q 'kind: Deployment'
+      - name: Show container logs
+        if: failure()
+        run: |
+          docker logs converter-api || true
+          docker logs web || true
 
   validate-k8s:
     runs-on: ubuntu-latest
@@ -92,47 +114,92 @@ jobs:
       - name: Validate manifests
         run: kubeconform -strict -summary -output pretty k8s/
 
-  # Deploys k8s/ to a real kind cluster (same config as `make cluster-up`) and calls the API.
-  # Catches what static checks can't: probes, securityContext vs the image, Pod Security.
+  # Deploys k8s/ to a real kind cluster (same config as `make cluster-up`) and uses the UI.
+  # Catches what static checks can't: probes, securityContext vs the image, Pod Security,
+  # and that the NetworkPolicy really blocks everything but web from reaching converter-api.
   e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Same name and tag as the manifest, so the pods use the image loaded below
+      # Same names and tags as the manifests, so the pods use the images loaded below
       # instead of pulling from the registry.
-      - name: Image name from the manifest
-        run: echo "IMAGE=$(scripts/image-name.sh):latest" >> "$GITHUB_ENV"
+      - name: Image names from the manifests
+        run: |
+          echo "API_IMAGE=$(scripts/image-name.sh converter-api):latest" >> "$GITHUB_ENV"
+          echo "WEB_IMAGE=$(scripts/image-name.sh web):latest" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Build image
+      - name: Build converter-api image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: ${{ env.SERVICE_DIR }}
+          context: services/converter-api
           push: false
           load: true
-          tags: ${{ env.IMAGE }}
-          cache-from: type=gha
+          tags: ${{ env.API_IMAGE }}
+          cache-from: type=gha,scope=converter-api
+      - name: Build web image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: services/web
+          push: false
+          load: true
+          tags: ${{ env.WEB_IMAGE }}
+          cache-from: type=gha,scope=web
       - name: Create kind cluster
         uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
         with:
           version_file: .tool-versions
           config: scripts/kind-cluster.yaml
           cluster_name: devtoolkit
-      - name: Load image and deploy
+      - name: Load images and deploy
         run: |
-          kind load docker-image "$IMAGE" --name devtoolkit
+          kind load docker-image "$API_IMAGE" "$WEB_IMAGE" --name devtoolkit
           kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/converter-api/
-          kubectl -n devtoolkit rollout status deployment/converter-api --timeout=180s
-      - name: Call the API through the Service
+          for service in $SERVICES; do kubectl apply -f "k8s/$service/"; done
+          for service in $SERVICES; do
+            kubectl -n devtoolkit rollout status "deployment/$service" --timeout=180s
+          done
+      - name: Use the UI through the web Service
         run: |
-          kubectl -n devtoolkit port-forward svc/converter-api 8000:8000 > /tmp/port-forward.log 2>&1 &
-          for i in $(seq 1 20); do curl -fsS localhost:8000/health && break; sleep 1; done
-          curl -fsS localhost:8000/ready
-          curl -fsS localhost:8000/convert/compose-to-k8s \
-            -H 'Content-Type: application/json' \
-            -d '{"compose_yaml": "services:\n  web:\n    image: nginx\n    ports: [\"80\"]"}' \
-            | tee /tmp/convert.json
-          grep -q '"success":true' /tmp/convert.json
+          kubectl -n devtoolkit port-forward svc/web 8080:8080 > /tmp/port-forward.log 2>&1 &
+          for i in $(seq 1 20); do curl -fsS localhost:8080/health && break; sleep 1; done
+          curl -fsS localhost:8080/ready
+          curl -fsS localhost:8080/ | grep -q 'href="/compose-to-k8s"'
+          # A conversion through the UI: web -> converter-api inside the cluster.
+          curl -fsS -F compose_yaml=$'services:\n  app:\n    image: nginx\n    ports: ["80"]' \
+            localhost:8080/compose-to-k8s | tee /tmp/convert.html | grep -q 'kind: Deployment'
+      - name: converter-api is reachable from web only
+        run: |
+          # Single quotes only: this string is also embedded in the JSON below. The marker is
+          # split in two ('RE' 'ACHED') because a failed probe's traceback quotes this source
+          # line, and the marker must only appear when the request really succeeded.
+          check="import urllib.request; urllib.request.urlopen('http://converter-api:8000/health', timeout=5); print('RE' 'ACHED')"
+          echo "From a web pod (must work):"
+          kubectl -n devtoolkit exec deployment/web -- python -c "$check" | grep -q REACHED
+          echo "From any other pod (must be blocked by the NetworkPolicy):"
+          # The probe reuses the web image (it has python and runs as 10001, so it passes the
+          # restricted Pod Security Standard) but not the web label, so the policy applies.
+          overrides=$(cat <<EOF
+          {"spec": {"automountServiceAccountToken": false,
+                    "securityContext": {"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
+                                        "seccompProfile": {"type": "RuntimeDefault"}},
+                    "containers": [{"name": "probe", "image": "$WEB_IMAGE", "imagePullPolicy": "IfNotPresent",
+                                    "securityContext": {"allowPrivilegeEscalation": false,
+                                                        "capabilities": {"drop": ["ALL"]}},
+                                    "command": ["python", "-c", "$check"]}]}}
+          EOF
+          )
+          rc=0
+          out=$(kubectl -n devtoolkit run probe --rm -i --restart=Never --image="$WEB_IMAGE" \
+                  --overrides="$overrides" 2>&1) || rc=$?
+          echo "$out"
+          if [[ "$rc" -eq 0 ]] || grep -q REACHED <<< "$out"; then
+            echo "::error::A pod without the web label reached converter-api. The NetworkPolicy is not enforced."
+            exit 1
+          fi
+          grep -q -i -E "timed out|timeout|refused" <<< "$out" || {
+            echo "::error::The probe failed for another reason than a blocked connection (see above)."
+            exit 1
+          }
       # Diagnostics only: never fails itself, so the step that really failed stays the
       # only red one.
       - name: Show cluster state
@@ -142,10 +209,13 @@ jobs:
             echo "No cluster to inspect: the 'Create kind cluster' step failed. See its log above."
             exit 0
           fi
-          kubectl -n devtoolkit get all || true
+          kubectl -n devtoolkit get all,networkpolicy || true
           kubectl -n devtoolkit describe pods || true
-          kubectl -n devtoolkit logs deployment/converter-api --all-containers --tail=100 || true
+          for service in $SERVICES; do
+            kubectl -n devtoolkit logs "deployment/$service" --all-containers --tail=100 || true
+          done
           cat /tmp/port-forward.log 2> /dev/null || true
+          head -c 4000 /tmp/convert.html 2> /dev/null || true
 
   # Only after every check above passes, and only for pushes to main (not PRs).
   publish:
@@ -158,10 +228,11 @@ jobs:
 
   deploy:
     needs: publish
-    if: needs.publish.outputs.built == 'true' && vars.CLOUD_RUN_SERVICE != ''
+    if: needs.publish.outputs.built == 'true' && vars.GCP_PROJECT_ID != ''
     permissions:
       contents: read
       id-token: write
     uses: ./.github/workflows/deploy-cloudrun.yaml
     with:
-      image: ${{ needs.publish.outputs.image }}
+      converter_api_image: ${{ needs.publish.outputs.converter_api_image }}
+      web_image: ${{ needs.publish.outputs.web_image }}

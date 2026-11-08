@@ -1,16 +1,30 @@
 name: Deploy to Cloud Run
 
+# Two Cloud Run services, same names as in k8s/:
+#   converter-api  private: only the web service account may call it (IAM)
+#   web            public
+# Automatic runs deploy the services whose images were just built. Manual runs deploy both.
 on:
   workflow_call:
     inputs:
-      image:
-        description: "Image to deploy, tagged with a commit SHA"
-        required: true
+      converter_api_image:
+        description: "converter-api image tagged with a commit SHA (empty = not rebuilt)"
+        required: false
         type: string
+        default: ""
+      web_image:
+        description: "web image tagged with a commit SHA (empty = not rebuilt)"
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: "Full commit SHA of the image to deploy (empty = latest commit that changed services/)"
+      converter_api_sha:
+        description: "Full commit SHA of the converter-api image (empty = newest commit that changed services/converter-api/)"
+        required: false
+        type: string
+      web_sha:
+        description: "Full commit SHA of the web image (empty = newest commit that changed services/web/)"
         required: false
         type: string
 
@@ -21,6 +35,11 @@ permissions:
 concurrency:
   group: deploy-cloud-run
   cancel-in-progress: false
+
+env:
+  REGION: ${{ vars.CLOUD_RUN_REGION }}
+  API_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_API_SERVICE_ACCOUNT }}
+  WEB_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_WEB_SERVICE_ACCOUNT }}
 
 jobs:
   deploy:
@@ -37,58 +56,74 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Work out image
-        id: image
-        env:
-          INPUT_IMAGE: ${{ inputs.image }}
-          INPUT_TAG: ${{ inputs.image_tag }}
-        run: |
-          name="ghcr.io/${GITHUB_REPOSITORY,,}/converter-api"
-          if [[ -n "$INPUT_IMAGE" ]]; then
-            ref="$INPUT_IMAGE"
-            tag="${ref##*:}"
-          else
-            # Images are only built for commits that change services/, so by default pick
-            # the newest such commit.
-            tag="${INPUT_TAG:-$(git log -1 --format=%H -- services/)}"
-            ref="${name}:${tag}"
-          fi
-          if ! [[ "$tag" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Image tag must be a full 40-character commit SHA, got '$tag'"
-            exit 1
-          fi
-          if ! git merge-base --is-ancestor "$tag" HEAD 2>/dev/null; then
-            echo "::error::Commit $tag is not on main. Only commits merged to main can be deployed."
-            exit 1
-          fi
-          echo "Deploying $ref"
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - name: Check the image exists
-        env:
-          IMAGE_REF: ${{ steps.image.outputs.ref }}
-        run: |
-          if ! docker manifest inspect "$IMAGE_REF" > /dev/null; then
-            echo "::error::No image $IMAGE_REF. Its CI run may have failed, or it was never built on main."
-            exit 1
-          fi
-
       - name: Authenticate to Google Cloud (Workload Identity, no keys)
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
-      # Cloud Run pulls the public image straight from GitHub Container Registry.
-      # Scales to zero when idle; max-instances caps cost (there is no rate limiting yet).
-      - name: Deploy
-        id: deploy
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Work out which images to deploy
+        id: images
+        env:
+          API_IMAGE: ${{ inputs.converter_api_image }}
+          WEB_IMAGE: ${{ inputs.web_image }}
+          API_SHA: ${{ inputs.converter_api_sha }}
+          WEB_SHA: ${{ inputs.web_sha }}
+        run: |
+          # Prints the image to deploy for a service, or nothing to leave it as it is.
+          resolve() {
+            local service="$1" image="$2" sha="$3" tag
+            if [[ -n "$image" ]]; then
+              tag="${image##*:}"
+            elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              # Images are only built for commits that change the service, so by default
+              # pick the newest such commit.
+              tag="${sha:-$(git log -1 --format=%H -- "services/${service}/")}"
+            elif ! gcloud run services describe "$service" --region "$REGION" --format='value(name)' > /dev/null 2>&1; then
+              echo "$service does not exist in Cloud Run yet; deploying it too." >&2
+              tag="$(git log -1 --format=%H -- "services/${service}/")"
+            else
+              return 0
+            fi
+            if ! [[ "$tag" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Image tag for $service must be a full 40-character commit SHA, got '$tag'" >&2
+              return 1
+            fi
+            if ! git merge-base --is-ancestor "$tag" HEAD 2>/dev/null; then
+              echo "::error::Commit $tag is not on main. Only commits merged to main can be deployed." >&2
+              return 1
+            fi
+            echo "ghcr.io/${GITHUB_REPOSITORY,,}/${service}:${tag}"
+          }
+          api="$(resolve converter-api "$API_IMAGE" "$API_SHA")" || exit 1
+          web="$(resolve web "$WEB_IMAGE" "$WEB_SHA")" || exit 1
+          if [[ -z "$api" && -z "$web" ]]; then
+            echo "::error::Nothing to deploy."
+            exit 1
+          fi
+          for ref in $api $web; do
+            echo "Deploying $ref"
+            if ! docker manifest inspect "$ref" > /dev/null 2>&1; then
+              echo "::error::Cannot read $ref. Either its CI run failed, or the package is private: Cloud Run can only pull public images from ghcr.io."
+              exit 1
+            fi
+          done
+          echo "api=$api" >> "$GITHUB_OUTPUT"
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+
+      # Private: every request needs an identity token from an allowed service account.
+      - name: Deploy converter-api
+        if: steps.images.outputs.api != ''
         uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d # v3.0.1
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
-          region: ${{ vars.CLOUD_RUN_REGION }}
-          service: ${{ vars.CLOUD_RUN_SERVICE }}
-          image: ${{ steps.image.outputs.ref }}
+          region: ${{ env.REGION }}
+          service: converter-api
+          image: ${{ steps.images.outputs.api }}
           env_vars: |-
             LOG_LEVEL=info
           flags: >-
@@ -96,18 +131,70 @@ jobs:
             --cpu=1
             --memory=512Mi
             --min-instances=0
-            --max-instances=2
+            --max-instances=1
             --concurrency=80
-            --service-account=${{ vars.CLOUD_RUN_SERVICE_ACCOUNT }}
+            --service-account=${{ env.API_SERVICE_ACCOUNT }}
+            --no-allow-unauthenticated
+
+      - name: Allow only web to call converter-api
+        id: api
+        run: |
+          url="$(gcloud run services describe converter-api --region "$REGION" --format='value(status.url)')"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          gcloud run services add-iam-policy-binding converter-api --region "$REGION" \
+            --member="serviceAccount:${WEB_SERVICE_ACCOUNT}" --role=roles/run.invoker > /dev/null
+          echo "converter-api: $url (web may invoke it)"
+
+      - name: Deploy web
+        if: steps.images.outputs.web != ''
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          region: ${{ env.REGION }}
+          service: web
+          image: ${{ steps.images.outputs.web }}
+          env_vars: |-
+            LOG_LEVEL=info
+            CONVERTER_API_URL=${{ steps.api.outputs.url }}
+            CONVERTER_API_AUTH=google
+          flags: >-
+            --port=8080
+            --cpu=1
+            --memory=512Mi
+            --min-instances=0
+            --max-instances=1
+            --concurrency=80
+            --service-account=${{ env.WEB_SERVICE_ACCOUNT }}
             --allow-unauthenticated
 
-      - name: Smoke test the live service
+      - name: Smoke test the live services
         env:
-          URL: ${{ steps.deploy.outputs.url }}
+          API_URL: ${{ steps.api.outputs.url }}
         run: |
+          web_url="$(gcloud run services describe web --region "$REGION" --format='value(status.url)')"
+          echo "web: $web_url"
           for i in $(seq 1 10); do
-            if curl -fsS "$URL/health"; then echo; echo "Live at $URL"; exit 0; fi
+            curl -fsS "$web_url/health" && break
             sleep 3
           done
-          echo "::error::$URL/health did not respond after deploy"
-          exit 1
+          # A conversion through the UI: web calls converter-api with an identity token.
+          # Retries cover a fresh IAM binding, which can take a minute to apply.
+          for i in $(seq 1 20); do
+            if curl -fsS -F compose_yaml=$'services:\n  app:\n    image: nginx\n    ports: ["80"]' \
+                 "$web_url/compose-to-k8s" | grep -q 'kind: Deployment'; then
+              echo "Conversion through the UI works."
+              break
+            fi
+            if [[ "$i" == 20 ]]; then
+              echo "::error::A conversion through $web_url did not work."
+              exit 1
+            fi
+            sleep 5
+          done
+          code="$(curl -s -o /dev/null -w '%{http_code}' "$API_URL/health")"
+          if [[ "$code" != 403 ]]; then
+            echo "::error::converter-api answered an anonymous request with HTTP $code; expected 403."
+            exit 1
+          fi
+          echo "converter-api refuses anonymous requests (403)."
+          echo "Live at $web_url"

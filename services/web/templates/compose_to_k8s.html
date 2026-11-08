@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Docker Compose → Kubernetes · DevToolkit{% endblock %}
+{% block description %}Convert a docker-compose file into Kubernetes Deployments and Services.{% endblock %}
+{% block content %}
+<h1 class="text-step-2 font-semibold">Docker Compose → Kubernetes</h1>
+<p class="mt-2 max-w-measure text-ink-muted">Paste a compose file or upload one. You get Deployments and Services as one YAML file.</p>
+
+{% include "_messages.html" %}
+
+<form method="post" action="/compose-to-k8s" enctype="multipart/form-data" class="mt-6 grid gap-4">
+  <label class="grid gap-1">
+    <span class="text-small font-medium">docker-compose.yaml</span>
+    <textarea name="compose_yaml" rows="16" spellcheck="false" required class="field font-mono"
+      placeholder="services:&#10;  web:&#10;    image: nginx&#10;    ports:&#10;      - &quot;8080:80&quot;">{{ compose_yaml }}</textarea>
+  </label>
+  <label class="inline-flex min-h-11 flex-wrap items-center gap-2 text-small">
+    <span class="font-medium">Or upload a file</span>
+    <input type="file" name="compose_file" accept=".yaml,.yml,text/yaml,application/yaml">
+  </label>
+  <div class="flex flex-wrap items-end gap-6">
+    <label class="grid gap-1 text-small">
+      <span class="font-medium">Namespace</span>
+      <input type="text" name="namespace" value="{{ namespace }}" pattern="[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?" class="field w-48 font-mono">
+    </label>
+    <label class="inline-flex min-h-11 items-center gap-2 text-small">
+      <input type="checkbox" name="include_service" value="true" {% if include_service %}checked{% endif %}>
+      Generate Services
+    </label>
+    <button type="submit" class="btn btn-primary">Convert</button>
+  </div>
+</form>
+
+{% if result is defined %}
+<section class="mt-8" aria-labelledby="result-heading">
+  <div class="flex flex-wrap items-center justify-between gap-2">
+    <h2 id="result-heading" class="text-step-1 font-semibold">Kubernetes manifests</h2>
+    <div class="flex gap-2">
+      <button type="button" data-copy="result" class="btn btn-secondary text-small">Copy</button>
+      <button type="button" data-download="result" data-filename="k8s.yaml" class="btn btn-secondary text-small">Download</button>
+    </div>
+  </div>
+  <pre id="result" class="code mt-3">{{ result }}</pre>
+  {% if notes %}
+  <h3 class="mt-6 font-semibold">Notes</h3>
+  <ul class="mt-2 list-disc space-y-1 pl-6 text-small">
+    {% for note in notes %}<li>{{ note }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

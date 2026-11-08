@@ -9,7 +9,7 @@ Start with the [main README](../README.md) for the quick start. Everything else 
 
 ## How it's built
 
-- [Architecture](architecture.md): project layout, and how the service runs on Kubernetes
+- [Architecture](architecture.md): the two services, project layout, and how they run on Kubernetes
 
 ## Running it
 
@@ -23,5 +23,5 @@ Start with the [main README](../README.md) for the quick start. Everything else 
 
 ## Contributing
 
-- [CONTRIBUTING.md](../CONTRIBUTING.md): local setup, adding a converter or tool, code style, PR process
+- [CONTRIBUTING.md](../CONTRIBUTING.md): local setup, adding a converter or service, code style, PR process
 - [SECURITY.md](../SECURITY.md): reporting a vulnerability

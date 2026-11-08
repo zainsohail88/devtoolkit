@@ -26,3 +26,6 @@ docker-compose.override.yml
 .vscode/
 .idea/
 .DS_Store
+
+# Built by `make css` / the web Dockerfile
+services/web/static/app.css
