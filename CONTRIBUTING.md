@@ -53,7 +53,7 @@ The `devtoolkit` namespace enforces the `restricted` Pod Security Standard, so p
 2. Keep each PR to one change: one converter, one fix, and so on.
 3. Run `make lint test` (and `make validate-k8s` if you touched `k8s/`) before pushing.
 4. Open a PR into `main`. CI must pass: lint, tests, Docker build, manifest validation.
-5. A maintainer reviews and merges. Merging to `main` builds and pushes the image.
+5. A maintainer reviews and merges. Merging to `main` builds and pushes the image. Production deploys are a separate manual step.
 
 ## License
 

@@ -5,13 +5,6 @@ name: Build and push images
 # run by hand, but only on main: images from other branches would skip CI and review.
 on:
   workflow_call:
-    outputs:
-      built:
-        description: "'true' if a new image was pushed for this commit"
-        value: ${{ jobs.converter-api.outputs.built }}
-      image:
-        description: "The pushed image, tagged with the commit SHA"
-        value: ${{ jobs.converter-api.outputs.image }}
   workflow_dispatch:
 
 permissions:
@@ -25,9 +18,6 @@ concurrency:
 jobs:
   converter-api:
     runs-on: ubuntu-latest
-    outputs:
-      built: ${{ steps.changes.outputs.build }}
-      image: ${{ steps.image.outputs.ref }}
     steps:
       - name: Only build from main
         if: github.ref != 'refs/heads/main'
@@ -71,7 +61,6 @@ jobs:
             echo "main has moved past ${GITHUB_SHA}; pushing the SHA tag only."
           fi
           echo "tags=${tags}" >> "$GITHUB_OUTPUT"
-          echo "ref=${name}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - if: steps.changes.outputs.build == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

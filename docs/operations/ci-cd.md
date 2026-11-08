@@ -8,6 +8,7 @@ All automation runs in GitHub Actions, from `.github/workflows/`.
 |----------|-----------|--------------|
 | `ci.yaml` | PR to `main`, push to `main` | Lint, tests, Docker build, manifest validation, deploy to a real cluster (jobs below) |
 | `build-push.yaml` | Called by CI on `main` after every check passes, if `services/**` changed. Can also be run by hand. | Builds and pushes the image to GitHub Container Registry |
+| `deploy-gke.yaml` | Manual only, from `main` | The maintainers' production deploy. You don't need it to run DevToolkit: see [Deploying to your cluster](deploy.md). |
 | `codeql.yaml` | PR to `main`, push to `main`, weekly | Security scan of the Python code and the workflow files |
 
 ### CI jobs
@@ -37,3 +38,4 @@ PR runs that get superseded by a newer push are cancelled. Runs on `main` always
 | CodeQL | `security-extended` queries on Python and on the workflows, e.g. to catch script injection |
 | CODEOWNERS | `.github/` changes need the repo owner's review |
 | Least privilege | Workflows get read-only tokens by default and request `packages: write` or `id-token: write` only in the job that needs it |
+| No stored cloud keys | GKE deploys use Workload Identity Federation |
