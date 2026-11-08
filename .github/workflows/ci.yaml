@@ -84,7 +84,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install kubeconform
         run: |
-          curl -sSfL -o kubeconform.tar.gz \
+          # Retry: GitHub's release downloads occasionally time out (e.g. HTTP 504).
+          curl -sSfL --retry 5 --retry-delay 5 --retry-all-errors -o kubeconform.tar.gz \
             "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
           tar xzf kubeconform.tar.gz kubeconform
           sudo mv kubeconform /usr/local/bin/
@@ -132,13 +133,19 @@ jobs:
             -d '{"compose_yaml": "services:\n  web:\n    image: nginx\n    ports: [\"80\"]"}' \
             | tee /tmp/convert.json
           grep -q '"success":true' /tmp/convert.json
+      # Diagnostics only: never fails itself, so the step that really failed stays the
+      # only red one.
       - name: Show cluster state
         if: failure()
         run: |
-          kubectl -n devtoolkit get all
-          kubectl -n devtoolkit describe pods
+          if ! kubectl cluster-info > /dev/null 2>&1; then
+            echo "No cluster to inspect: the 'Create kind cluster' step failed. See its log above."
+            exit 0
+          fi
+          kubectl -n devtoolkit get all || true
+          kubectl -n devtoolkit describe pods || true
           kubectl -n devtoolkit logs deployment/converter-api --all-containers --tail=100 || true
-          cat /tmp/port-forward.log || true
+          cat /tmp/port-forward.log 2> /dev/null || true
 
   # Only after every check above passes, and only for pushes to main (not PRs).
   publish:
