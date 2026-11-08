@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import logging
 import os
 import re
+import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, Form, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -53,7 +55,51 @@ MAX_INPUT_CHARS = 100_000
 # Room for the form fields and multipart framing around a maximum-size input.
 MAX_BODY_BYTES = 4 * MAX_INPUT_CHARS + 16_384
 NAMESPACE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+OUTPUTS = ("manifests", "helm")
 UNAVAILABLE = "The converter is unavailable right now. Please try again in a minute."
+
+# A realistic compose file for the "Load an example" button: two services, a health check,
+# a dependency and a named volume, so every kind of conversion shows up in the result.
+EXAMPLE_COMPOSE = """\
+name: shop
+services:
+  web:
+    image: nginx:1.27
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+  api:
+    image: ghcr.io/example/shop-api:1.4.2
+    ports:
+      - "3000"
+    environment:
+      DATABASE_URL: postgres://shop:shop@db:5432/shop
+      LOG_LEVEL: info
+    depends_on:
+      - db
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+  db:
+    image: postgres:16
+    ports:
+      - "5432"
+    environment:
+      POSTGRES_PASSWORD: shop
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+volumes:
+  dbdata: {}
+"""
 
 # Applies a saved theme choice before first paint, so the page never flashes the wrong theme.
 # It must be inline (a deferred script is too late), so the CSP allows exactly this script by
@@ -65,11 +111,14 @@ THEME_SCRIPT = (
 )
 THEME_SCRIPT_HASH = base64.b64encode(hashlib.sha256(THEME_SCRIPT.encode()).digest()).decode()
 
+# Scripts: only our own files plus the theme script by hash. Styles: the code editor positions
+# its cursor and layers with inline style attributes and injects its own stylesheet, which a
+# nonce cannot cover, so inline styles are allowed; every piece of user content is escaped.
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        f"default-src 'self'; script-src 'self' 'sha256-{THEME_SCRIPT_HASH}'; style-src 'self'; "
-        "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; "
-        "object-src 'none'"
+        f"default-src 'self'; script-src 'self' 'sha256-{THEME_SCRIPT_HASH}'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -119,6 +168,11 @@ async def read_input(text: str, upload: UploadFile | None) -> str:
     return text
 
 
+def wants_fragment(request: Request) -> bool:
+    """The page's script posts forms itself and asks for just the result markup."""
+    return request.headers.get("x-requested-with") == "fetch"
+
+
 def create_app(api: ApiClient | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -161,6 +215,13 @@ def create_app(api: ApiClient | None = None) -> FastAPI:
     ) -> HTMLResponse:
         return templates.TemplateResponse(request, name, context, status_code=status_code)
 
+    def tool_page(
+        request: Request, name: str, fragment: str, context: dict[str, Any], status_code: int = 200
+    ) -> HTMLResponse:
+        """The whole page for a normal post, or just the result markup for the page's script."""
+        template = fragment if wants_fragment(request) else name
+        return page(request, template, context, status_code)
+
     # Error pages with a way back, instead of FastAPI's JSON.
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException) -> HTMLResponse:
@@ -198,13 +259,77 @@ def create_app(api: ApiClient | None = None) -> FastAPI:
     def index(request: Request) -> HTMLResponse:
         return page(request, "index.html", {})
 
+    # --- Compose -> Kubernetes ------------------------------------------------------------
+
+    def compose_context(
+        compose_yaml: str, namespace: str, include_service: bool, output: str
+    ) -> dict[str, Any]:
+        return {
+            "compose_yaml": compose_yaml,
+            "namespace": namespace,
+            "include_service": include_service,
+            "output": output,
+        }
+
     @app.get("/compose-to-k8s", response_class=HTMLResponse)
-    def compose_form(request: Request) -> HTMLResponse:
+    def compose_form(request: Request, example: str | None = None) -> Response:
+        if example:
+            # The page's script asks for the text alone; a plain visit gets the filled form.
+            if "text/plain" in request.headers.get("accept", ""):
+                return PlainTextResponse(EXAMPLE_COMPOSE)
+            return page(
+                request,
+                "compose_to_k8s.html",
+                compose_context(EXAMPLE_COMPOSE, "shop", True, "manifests"),
+            )
         return page(
-            request,
-            "compose_to_k8s.html",
-            {"compose_yaml": "", "namespace": "default", "include_service": True},
+            request, "compose_to_k8s.html", compose_context("", "default", True, "manifests")
         )
+
+    async def convert(
+        request: Request,
+        compose_yaml: str,
+        compose_file: UploadFile | None,
+        namespace: str,
+        include_service: bool,
+        output: str,
+    ) -> tuple[dict[str, Any], int]:
+        """Run a conversion. Returns (template context, HTTP status)."""
+        context = compose_context(compose_yaml, namespace, include_service, output)
+        try:
+            context["compose_yaml"] = await read_input(compose_yaml, compose_file)
+            if not NAMESPACE_RE.match(namespace):
+                raise InputError(
+                    "Namespace must be lowercase letters, digits and '-', at most 63 characters, "
+                    "starting and ending with a letter or digit."
+                )
+            if output not in OUTPUTS:
+                raise InputError("Output must be 'manifests' or 'helm'.")
+        except InputError as exc:
+            return context | {"error": str(exc)}, 400
+
+        try:
+            status, body = await request.app.state.api.post(
+                "/convert/compose-to-k8s/files",
+                {
+                    "compose_yaml": context["compose_yaml"],
+                    "namespace": namespace,
+                    "include_service": include_service,
+                    "output": output,
+                },
+            )
+        except ApiUnavailableError as exc:
+            logger.error("converter-api unavailable: %s", exc)
+            return context | {"error": UNAVAILABLE}, 502
+
+        if status == 200 and body.get("success") and isinstance(body.get("files"), list):
+            return context | {"files": body["files"], "notes": body.get("notes", [])}, 200
+        error = body.get("error") or "The converter couldn't process this input."
+        return context | {
+            "error": error,
+            "error_line": body.get("line"),
+            "error_column": body.get("column"),
+        }, 400
 
     @app.post("/compose-to-k8s", response_class=HTMLResponse)
     async def compose_convert(
@@ -213,43 +338,41 @@ def create_app(api: ApiClient | None = None) -> FastAPI:
         compose_file: UploadFile | None = None,
         namespace: str = Form("default"),
         include_service: bool = Form(False),
+        output: str = Form("manifests"),
     ) -> HTMLResponse:
-        context: dict[str, Any] = {
-            "compose_yaml": compose_yaml,
-            "namespace": namespace,
-            "include_service": include_service,
-        }
-        try:
-            context["compose_yaml"] = await read_input(compose_yaml, compose_file)
-            if not NAMESPACE_RE.match(namespace):
-                raise InputError(
-                    "Namespace must be lowercase letters, digits and '-', at most 63 characters, "
-                    "starting and ending with a letter or digit."
-                )
-        except InputError as exc:
-            return page(request, "compose_to_k8s.html", context | {"error": str(exc)}, 400)
+        context, status = await convert(
+            request, compose_yaml, compose_file, namespace, include_service, output
+        )
+        return tool_page(request, "compose_to_k8s.html", "_result.html", context, status)
 
-        try:
-            status, body = await request.app.state.api.post(
-                "/convert/compose-to-k8s/yaml",
-                {
-                    "compose_yaml": context["compose_yaml"],
-                    "namespace": namespace,
-                    "include_service": include_service,
-                },
-            )
-        except ApiUnavailableError as exc:
-            logger.error("converter-api unavailable: %s", exc)
-            return page(request, "compose_to_k8s.html", context | {"error": UNAVAILABLE}, 502)
+    @app.post("/compose-to-k8s/zip")
+    async def compose_zip(
+        request: Request,
+        compose_yaml: str = Form(""),
+        compose_file: UploadFile | None = None,
+        namespace: str = Form("default"),
+        include_service: bool = Form(False),
+        output: str = Form("manifests"),
+    ) -> Response:
+        """The same conversion, downloaded as a zip of the files."""
+        context, status = await convert(
+            request, compose_yaml, compose_file, namespace, include_service, output
+        )
+        if status != 200:
+            return page(request, "compose_to_k8s.html", context, status)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for file in context["files"]:
+                archive.writestr(file["path"], file["content"])
+        buffer.seek(0)
+        name = "helm-chart.zip" if output == "helm" else "kubernetes-manifests.zip"
+        return StreamingResponse(
+            buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
 
-        if status == 200 and body.get("success"):
-            return page(
-                request,
-                "compose_to_k8s.html",
-                context | {"result": body.get("yaml", ""), "notes": body.get("notes", [])},
-            )
-        error = body.get("error") or "The converter couldn't process this input."
-        return page(request, "compose_to_k8s.html", context | {"error": error}, 400)
+    # --- YAML check -----------------------------------------------------------------------
 
     @app.get("/validate-yaml", response_class=HTMLResponse)
     def validate_form(request: Request) -> HTMLResponse:
@@ -265,7 +388,13 @@ def create_app(api: ApiClient | None = None) -> FastAPI:
         try:
             context["yaml_text"] = await read_input(yaml_text, yaml_file)
         except InputError as exc:
-            return page(request, "validate_yaml.html", context | {"error": str(exc)}, 400)
+            return tool_page(
+                request,
+                "validate_yaml.html",
+                "_validation.html",
+                context | {"error": str(exc)},
+                400,
+            )
 
         try:
             status, body = await request.app.state.api.post(
@@ -273,16 +402,25 @@ def create_app(api: ApiClient | None = None) -> FastAPI:
             )
         except ApiUnavailableError as exc:
             logger.error("converter-api unavailable: %s", exc)
-            return page(request, "validate_yaml.html", context | {"error": UNAVAILABLE}, 502)
-
-        if status != 200 or "valid" not in body:
-            return page(
+            return tool_page(
                 request,
                 "validate_yaml.html",
+                "_validation.html",
+                context | {"error": UNAVAILABLE},
+                502,
+            )
+
+        if status != 200 or "valid" not in body:
+            return tool_page(
+                request,
+                "validate_yaml.html",
+                "_validation.html",
                 context | {"error": "The validator couldn't process this input."},
                 400,
             )
-        return page(request, "validate_yaml.html", context | {"validation": body})
+        return tool_page(
+            request, "validate_yaml.html", "_validation.html", context | {"validation": body}
+        )
 
     return app
 

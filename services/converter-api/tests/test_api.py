@@ -213,3 +213,19 @@ def test_convert_files_rejects_unknown_output_and_bad_compose():
         "success": False,
         "error": "Invalid compose file: no 'services' defined",
     }
+
+
+def test_convert_error_carries_line_and_column_for_yaml_syntax_errors():
+    response = client.post(
+        "/convert/compose-to-k8s/files",
+        json={"compose_yaml": "services:\n  web:\n   image: x\n  ports: [80"},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"].startswith("Invalid YAML")
+    assert body["line"] >= 1 and body["column"] >= 1
+    # Other errors have no position.
+    response = client.post("/convert/compose-to-k8s/files", json={"compose_yaml": "services: {}"})
+    assert response.status_code == 400
+    assert "line" not in response.json()

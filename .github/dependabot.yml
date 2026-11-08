@@ -20,6 +20,18 @@ updates:
         applies-to: security-updates
         patterns: ["*"]
 
+  - package-ecosystem: npm
+    directory: /services/web/editor
+    schedule:
+      interval: weekly
+    groups:
+      editor-minor-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      editor-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

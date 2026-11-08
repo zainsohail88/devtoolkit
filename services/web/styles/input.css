@@ -1,14 +1,18 @@
 /* DevToolkit web: the design system.
  *
  * Every colour, size, radius and face is a token declared here, once. Templates only ever
- * reference tokens (bg-surface, text-ink, rounded-sm) or the component classes at the bottom.
- * Tailwind's own palette, radii, fonts and text sizes are removed below, so a class such as
- * bg-slate-50 produces no CSS: a raw value cannot sneak into a template.
+ * reference tokens (bg-surface, text-ink, rounded-md) or the component classes at the bottom.
+ * Tailwind's own palette, radii, fonts, shadows and text sizes are removed below, so a class
+ * such as bg-slate-50 produces no CSS: a raw value cannot sneak into a template.
+ *
+ * Direction: violet on graphite. Dark graphite surfaces are the primary theme, a light
+ * theme follows the system preference, and the toggle overrides either.
  *
  * Compiled by the Dockerfile (css stage) or `make css` into static/app.css.
  */
 @import "tailwindcss" source(none);
 @source "../templates";
+@source "./static-classes.txt";
 
 @theme {
   --color-*: initial;
@@ -17,40 +21,52 @@
   --text-*: initial;
   --shadow-*: initial;
 
+  /* light theme values (the dark values are below, in the two dark blocks) */
+
   /* surfaces */
-  --color-surface: #f3f5f7;          /* page background */
-  --color-surface-raised: #ffffff;   /* cards, panels, header, form fields */
-  --color-surface-sunken: #e8ecf0;   /* code blocks */
+  --color-surface: #f5f4f9;          /* page background */
+  --color-surface-raised: #ffffff;   /* cards, panels, header, fields */
+  --color-surface-sunken: #ebe9f3;   /* editors, code */
+  --color-glass: rgb(255 255 255 / 0.72); /* translucent header and cards over the glow */
 
   /* text */
-  --color-ink: #15202b;
-  --color-ink-muted: #536270;        /* secondary text, captions: 5.7:1 on the page */
+  --color-ink: #1b1a24;
+  --color-ink-muted: #5b5970;        /* secondary text: 5.9:1 on the page */
 
   /* lines */
-  --color-divider: #d6dde5;          /* decorative: card edges, the header rule */
-  --color-hairline: #888d94;         /* interface borders (fields, buttons): 3:1 on both surfaces */
+  --color-divider: #dcd9e8;          /* decorative: card edges, rules */
+  --color-hairline: #8a8798;         /* interface borders (fields, buttons): 3:1 on both surfaces */
 
-  /* accent: the one colour that means "act here" */
-  --color-accent: #1a56c4;
-  --color-accent-strong: #154aa8;    /* hover */
+  /* accent: violet, the one colour that means "act here" */
+  --color-accent: #6d28d9;
+  --color-accent-strong: #5b21b6;    /* hover */
+  --color-accent-glow: rgb(124 58 237 / 0.18); /* background glow behind the hero */
   --color-on-accent: #ffffff;
-  --color-accent-soft: #dbe6fa;
-  --color-ink-on-accent-soft: #143f8f; /* the accent itself is too light for text on the soft tint */
+  --color-accent-soft: #ede9fe;
+  --color-ink-on-accent-soft: #4c1d95;
   --color-focus: var(--color-accent);
 
   /* two signals: errors and success, nothing else */
-  --color-danger: #b42318;
-  --color-danger-soft: #fde7e5;
-  --color-ink-on-danger-soft: #8f1d14;
-  --color-success: #1b7a3f;
-  --color-success-soft: #dcf3e4;
-  --color-ink-on-success-soft: #145c30;
+  --color-danger: #c0261f;
+  --color-danger-soft: #fde8e7;
+  --color-ink-on-danger-soft: #8f1b16;
+  --color-success: #15803d;
+  --color-success-soft: #dcfce7;
+  --color-ink-on-success-soft: #14532d;
+
+  /* YAML syntax colours in the editors, all >= 4.5:1 on the sunken surface */
+  --color-syntax-key: #6d28d9;
+  --color-syntax-string: #0f766e;
+  --color-syntax-number: #92400e;
+  --color-syntax-bool: #be185d;
+  --color-syntax-comment: #5f6572;
+  --color-syntax-punct: #5b5970;
 
   /* type: system fonts only, zero bytes downloaded */
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
-  /* type scale: fluid between a floor and a ceiling, no media queries */
+  /* type scale: fluid between a floor and a ceiling */
   --text-small: 0.875rem;
   --text-small--line-height: 1.25rem;
   --text-step-0: 1rem;
@@ -59,17 +75,21 @@
   --text-step-1--line-height: 1.4;
   --text-step-2: clamp(1.4rem, 1vw + 1.1rem, 1.9rem);
   --text-step-2--line-height: 1.25;
-  --text-step-3: clamp(1.9rem, 2.5vw + 1.2rem, 3rem);
-  --text-step-3--line-height: 1.15;
+  --text-step-3: clamp(2rem, 3vw + 1.2rem, 3.25rem);
+  --text-step-3--line-height: 1.1;
 
   /* measure: prose line length, and the layout width */
-  --container-measure: 74ch;
-  --container-measure-wide: 1120px;
+  --container-measure: 70ch;
+  --container-measure-wide: 1200px;
 
-  /* radius: small and even, reads technical */
-  --radius-sm: 4px;
-  --radius-md: 6px;
+  /* radius: soft but not round */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
   --radius-full: 999px;
+
+  /* one shadow, for raised cards */
+  --shadow-card: 0 1px 2px rgb(16 12 36 / 0.06), 0 8px 24px -12px rgb(16 12 36 / 0.18);
 
   /* spacing keeps Tailwind's 4px base: 1=4px 2=8px 3=12px 4=16px 6=24px 8=32px 12=48px 16=64px.
      Use those eight steps and nothing in between. */
@@ -80,51 +100,74 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --color-surface: #0f141a;
-    --color-surface-raised: #161d25;
-    --color-surface-sunken: #0a0e13;
-    --color-ink: #e6ebf0;
-    --color-ink-muted: #9ba8b5;
-    --color-divider: #263038;
-    --color-hairline: #646970;
-    --color-accent: #78a9ff;
-    --color-accent-strong: #9dbfff;
-    --color-on-accent: #0b1a33;
-    --color-accent-soft: #172a4a;
-    --color-ink-on-accent-soft: #b3ccff;
+    --color-surface: #121418;
+    --color-surface-raised: #1a1d23;
+    --color-surface-sunken: #0d0f12;
+    --color-glass: rgb(26 29 35 / 0.72);
+    --color-ink: #e8e9ee;
+    --color-ink-muted: #9ea3b0;
+    --color-divider: #272b33;
+    --color-hairline: #646a78;
+    --color-accent: #a78bfa;
+    --color-accent-strong: #c4b5fd;
+    --color-accent-glow: rgb(139 92 246 / 0.22);
+    --color-on-accent: #1a0b3d;
+    --color-accent-soft: #2a2250;
+    --color-ink-on-accent-soft: #d6c9ff;
     --color-danger: #ff8a80;
     --color-danger-soft: #3a1512;
     --color-ink-on-danger-soft: #ffb4ab;
     --color-success: #6fd392;
     --color-success-soft: #0f2e1b;
     --color-ink-on-success-soft: #9fe6b8;
+    --color-syntax-key: #c4b5fd;
+    --color-syntax-string: #6ee7b7;
+    --color-syntax-number: #fcd34d;
+    --color-syntax-bool: #f9a8d4;
+    --color-syntax-comment: #8b93a7;
+    --color-syntax-punct: #9ea3b0;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -12px rgb(0 0 0 / 0.6);
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --color-surface: #0f141a;
-  --color-surface-raised: #161d25;
-  --color-surface-sunken: #0a0e13;
-  --color-ink: #e6ebf0;
-  --color-ink-muted: #9ba8b5;
-  --color-divider: #263038;
-  --color-hairline: #646970;
-  --color-accent: #78a9ff;
-  --color-accent-strong: #9dbfff;
-  --color-on-accent: #0b1a33;
-  --color-accent-soft: #172a4a;
-  --color-ink-on-accent-soft: #b3ccff;
+  --color-surface: #121418;
+  --color-surface-raised: #1a1d23;
+  --color-surface-sunken: #0d0f12;
+  --color-glass: rgb(26 29 35 / 0.72);
+  --color-ink: #e8e9ee;
+  --color-ink-muted: #9ea3b0;
+  --color-divider: #272b33;
+  --color-hairline: #646a78;
+  --color-accent: #a78bfa;
+  --color-accent-strong: #c4b5fd;
+  --color-accent-glow: rgb(139 92 246 / 0.22);
+  --color-on-accent: #1a0b3d;
+  --color-accent-soft: #2a2250;
+  --color-ink-on-accent-soft: #d6c9ff;
   --color-danger: #ff8a80;
   --color-danger-soft: #3a1512;
   --color-ink-on-danger-soft: #ffb4ab;
   --color-success: #6fd392;
   --color-success-soft: #0f2e1b;
   --color-ink-on-success-soft: #9fe6b8;
+  --color-syntax-key: #c4b5fd;
+  --color-syntax-string: #6ee7b7;
+  --color-syntax-number: #fcd34d;
+  --color-syntax-bool: #f9a8d4;
+  --color-syntax-comment: #8b93a7;
+  --color-syntax-punct: #9ea3b0;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -12px rgb(0 0 0 / 0.6);
 }
 
 @layer base {
   :root {
     color-scheme: light;
+  }
+  body {
+    /* A soft violet glow at the top, so the page is not a flat grey slab. */
+    background-image: radial-gradient(60rem 24rem at 50% -8rem, var(--color-accent-glow), transparent 70%);
+    background-repeat: no-repeat;
   }
   /* Visible focus everywhere, never removed without a replacement. */
   :focus-visible {
@@ -139,12 +182,17 @@
       transition-duration: 0.01ms !important;
     }
   }
+  .icon {
+    width: 1.25em;
+    height: 1.25em;
+    flex: none;
+  }
 }
 
 /* One component per concept. Variants are modifier classes, not new components. */
 @layer components {
   .btn {
-    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-sm border px-4 text-step-0 font-medium transition-colors;
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-md border px-4 text-step-0 font-medium transition-colors;
   }
   .btn-primary {
     @apply border-accent bg-accent text-on-accent hover:border-accent-strong hover:bg-accent-strong;
@@ -152,20 +200,26 @@
   .btn-secondary {
     @apply border-hairline bg-surface-raised text-ink hover:bg-surface-sunken;
   }
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-ink-muted hover:bg-accent-soft hover:text-ink;
+  }
+  .btn-sm {
+    @apply min-h-9 px-3 text-small;
+  }
   .card {
-    @apply block rounded-md border border-divider bg-surface-raised p-6 transition-colors;
+    @apply block rounded-lg border border-divider bg-surface-raised p-6 shadow-card transition-colors;
   }
   a.card:hover {
-    @apply border-hairline;
+    @apply border-accent;
   }
   .field {
-    @apply w-full rounded-sm border border-hairline bg-surface-raised px-3 py-2 text-step-0 text-ink;
+    @apply w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-step-0 text-ink;
   }
   input.field {
     @apply min-h-11;
   }
   .alert {
-    @apply rounded-sm border px-4 py-3 text-step-0;
+    @apply flex items-start gap-3 rounded-md border px-4 py-3 text-step-0;
   }
   .alert-error {
     @apply border-danger bg-danger-soft text-ink-on-danger-soft;
@@ -174,17 +228,37 @@
     @apply border-success bg-success-soft text-ink-on-success-soft;
   }
   .code {
-    @apply overflow-x-auto rounded-sm border border-divider bg-surface-sunken p-4 font-mono text-small;
+    @apply overflow-x-auto rounded-md border border-divider bg-surface-sunken p-4 font-mono text-small;
+  }
+  .tag {
+    @apply inline-flex items-center gap-1 rounded-full bg-accent-soft px-3 py-1 text-small font-medium text-ink-on-accent-soft;
   }
   .nav-link {
-    @apply inline-flex min-h-11 items-center text-small text-ink-muted hover:text-ink;
+    @apply inline-flex min-h-11 items-center gap-2 text-small text-ink-muted hover:text-ink;
   }
   .nav-link[aria-current="page"] {
     @apply text-ink;
   }
+  /* The result's file tree: one button per file, the open one highlighted. */
+  .file-tab {
+    @apply flex w-full min-h-11 items-center gap-2 rounded-md px-3 text-left font-mono text-small text-ink-muted hover:bg-accent-soft hover:text-ink;
+  }
+  .file-tab[aria-selected="true"] {
+    @apply bg-accent-soft text-ink-on-accent-soft;
+  }
+  /* The editor fills its container; the editor bundle styles the inside with tokens. */
+  .editor {
+    @apply min-h-72 rounded-md;
+  }
+  .editor .cm-editor {
+    @apply h-full min-h-72;
+  }
+  .editor[data-dragover="true"] .cm-editor {
+    @apply border-accent;
+  }
   /* Keyboard users: first Tab lands here and jumps past the header. */
   .skip-link {
-    @apply absolute left-2 z-10 inline-flex min-h-11 items-center rounded-sm bg-accent px-4 font-medium text-on-accent;
+    @apply absolute left-2 z-10 inline-flex min-h-11 items-center rounded-md bg-accent px-4 font-medium text-on-accent;
     top: -100vh;
   }
   .skip-link:focus {

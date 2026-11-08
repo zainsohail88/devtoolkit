@@ -1,0 +1,43 @@
+{% include "_messages.html" %}
+{% if files %}
+<div class="grid gap-3 md:grid-cols-[14rem_1fr]" data-files>
+  <nav aria-label="Generated files" class="rounded-lg border border-divider bg-surface-raised p-2">
+    <p class="px-3 py-2 text-small text-ink-muted">{{ files|length }} file{{ '' if files|length == 1 else 's' }}{% if output == 'helm' %}, Helm chart{% endif %}</p>
+    <ul role="tablist" class="grid gap-1">
+      {% for file in files %}
+      <li><a role="tab" href="#file-{{ loop.index0 }}" aria-controls="file-{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}" class="file-tab" data-file-tab="{{ loop.index0 }}">{% include "icons/file-code.svg" %}<span class="truncate">{{ file.path }}</span></a></li>
+      {% endfor %}
+    </ul>
+  </nav>
+  <div class="min-w-0">
+    {% for file in files %}
+    <article id="file-{{ loop.index0 }}" role="tabpanel" data-file-panel="{{ loop.index0 }}" data-path="{{ file.path }}" class="{% if not loop.first %}mt-6 md:mt-0{% endif %}">
+      <header class="flex flex-wrap items-center justify-between gap-2 pb-2">
+        <h3 class="font-mono text-small text-ink-muted">{{ file.path }}</h3>
+        <div class="flex gap-2">
+          <button type="button" class="btn btn-secondary btn-sm" data-copy="file-{{ loop.index0 }}-content">{% include "icons/copy.svg" %} Copy</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-download="file-{{ loop.index0 }}-content" data-filename="{{ file.path.split('/')[-1] }}">{% include "icons/download.svg" %} Download</button>
+        </div>
+      </header>
+      <pre id="file-{{ loop.index0 }}-content" class="code" data-file-content>{{ file.content }}</pre>
+    </article>
+    {% endfor %}
+  </div>
+</div>
+{% if notes %}
+<section class="mt-6 rounded-lg border border-divider bg-surface-raised p-4" aria-labelledby="notes-heading">
+  <h3 id="notes-heading" class="flex items-center gap-2 font-medium">{% include "icons/info.svg" %} Needs a decision ({{ notes|length }})</h3>
+  <p class="mt-1 text-small text-ink-muted">Everything else was converted. These need you.</p>
+  <ul class="mt-3 grid gap-2 text-small">
+    {% for note in notes %}<li class="flex gap-2"><span class="mt-2 size-1.5 flex-none rounded-full bg-accent"></span><span>{{ note }}</span></li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% elif not error %}
+<div class="grid min-h-72 place-items-center rounded-lg border border-dashed border-hairline p-6 text-center text-small text-ink-muted" data-empty>
+  <div>
+    <span class="mx-auto inline-flex size-10 items-center justify-center rounded-md bg-accent-soft text-ink-on-accent-soft">{% include "icons/folder-open.svg" %}</span>
+    <p class="mt-3">Your Kubernetes files appear here, one per resource.</p>
+  </div>
+</div>
+{% endif %}

@@ -19,14 +19,18 @@ services/
     tests/                pytest tests
     Dockerfile            Multi-stage build, non-root user
   web/                    FastAPI + Jinja2 service: the pages
-    main.py               Routes, form handling, security headers
+    main.py               Routes, form handling, result fragments, zip download, security headers
     api_client.py         Calls converter-api (with a Google identity token on Cloud Run)
-    templates/            Jinja2 templates: index, the two tools, error page
-    static/               app.js (theme toggle, copy/download); app.css is built from styles/
+    templates/            Jinja2 templates: index, the two tools, result fragments, error page
+      icons/              Lucide icons (ISC) and the GitHub mark (Simple Icons, CC0), inlined
+    static/               app.js (editors, in-place results, theme, copy/download);
+                          app.css and vendor/editor.js are built, not committed
     styles/input.css      The design system: every colour, size and radius as a token, light
                           and dark values, and the component classes. Compiled by Tailwind.
+    editor/               CodeMirror 6 YAML editor: src/editor.js plus pinned npm dependencies,
+                          bundled by esbuild into static/vendor/editor.js
     tests/                pytest tests; converter-api is replaced by a fake
-    Dockerfile            Multi-stage build: Python deps, Tailwind CLI, runtime
+    Dockerfile            Multi-stage build: Python deps, Tailwind CLI, Node (editor), runtime
 k8s/
   namespace.yaml          devtoolkit namespace
   converter-api/          Deployment, Service, ConfigMap, NetworkPolicy
@@ -66,6 +70,10 @@ The `devtoolkit` namespace enforces the `restricted` [Pod Security Standard](htt
 Both Dockerfiles use the official slim Python image (the exact version is set in each Dockerfile and kept current by Dependabot) and run as UID 10001. Each has a Docker `HEALTHCHECK` for plain `docker run`; Kubernetes uses its own probes instead.
 
 - `services/converter-api/Dockerfile`: **builder** installs dependencies into a virtualenv; **runtime** copies only the virtualenv and the code.
-- `services/web/Dockerfile`: the same two stages, plus a **css** stage that downloads Tailwind's standalone CLI (version and SHA-256 pinned in the Dockerfile) and compiles `styles/input.css` into one small stylesheet. No Node.js anywhere.
+- `services/web/Dockerfile`: the same two stages, plus a **css** stage that downloads Tailwind's standalone CLI (version and SHA-256 pinned in the Dockerfile) and compiles `styles/input.css` into one small stylesheet, and an **editor** stage that bundles the CodeMirror editor from `editor/` with esbuild (`npm ci` against the committed lockfile). Neither tool reaches the runtime image.
+
+## How a page works
+
+Every page works without JavaScript: the form posts, the server renders the whole page again with the result. With JavaScript, `app.js` posts the same form with an `X-Requested-With: fetch` header, the server returns only the result fragment (`_result.html` or `_validation.html`), and the script swaps it in place, turns the file list into tabs, mounts a read-only editor per file, and marks the error line in the input editor from the fragment's `data-error-line` attribute. The zip download is a plain form post to `/compose-to-k8s/zip`.
 
 Images are published to GitHub Container Registry, one per service, tagged with the commit SHA and `latest`. Each image name is set once, in `k8s/<service>/deployment.yaml`; scripts and CI read it from there. See [CI/CD](operations/ci-cd.md).

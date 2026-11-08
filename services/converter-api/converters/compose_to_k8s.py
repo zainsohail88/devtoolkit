@@ -139,9 +139,12 @@ class ComposeError(ValueError):
     input and never includes internal details.
     """
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, line: int | None = None, column: int | None = None) -> None:
         super().__init__(message)
         self.message = message
+        # 1-based position in the input, when the error is a YAML syntax error.
+        self.line = line
+        self.column = column
 
 
 def parse_compose(yaml_string: str) -> dict[str, Any]:
@@ -160,7 +163,10 @@ def parse_compose(yaml_string: str) -> dict[str, Any]:
         # `problem` is the parser's description of the input ("mapping values are not
         # allowed here"). Nothing else from the exception reaches the user.
         problem = getattr(exc, "problem", None) or "syntax error"
-        raise ComposeError(f"Invalid YAML: {problem}") from exc
+        mark = getattr(exc, "problem_mark", None)
+        line = mark.line + 1 if mark is not None else None
+        column = mark.column + 1 if mark is not None else None
+        raise ComposeError(f"Invalid YAML: {problem}", line, column) from exc
 
     check_node_count(data)
 

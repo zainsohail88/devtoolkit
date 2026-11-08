@@ -1,51 +1,58 @@
 {% extends "base.html" %}
 {% block title %}Docker Compose → Kubernetes · DevToolkit{% endblock %}
-{% block description %}Convert a docker-compose file into Kubernetes Deployments and Services.{% endblock %}
+{% block description %}Convert a docker-compose file into Kubernetes manifests or a Helm chart, one file per resource.{% endblock %}
 {% block content %}
-<h1 class="text-step-2 font-semibold">Docker Compose → Kubernetes</h1>
-<p class="mt-2 max-w-measure text-ink-muted">Paste a compose file or upload one. You get Deployments and Services as one YAML file.</p>
-
-{% include "_messages.html" %}
-
-<form method="post" action="/compose-to-k8s" enctype="multipart/form-data" class="mt-6 grid gap-4">
-  <label class="grid gap-1">
-    <span class="text-small font-medium">docker-compose.yaml</span>
-    <textarea name="compose_yaml" rows="16" spellcheck="false" required class="field font-mono"
-      placeholder="services:&#10;  web:&#10;    image: nginx&#10;    ports:&#10;      - &quot;8080:80&quot;">{{ compose_yaml }}</textarea>
-  </label>
-  <label class="inline-flex min-h-11 flex-wrap items-center gap-2 text-small">
-    <span class="font-medium">Or upload a file</span>
-    <input type="file" name="compose_file" accept=".yaml,.yml,text/yaml,application/yaml">
-  </label>
-  <div class="flex flex-wrap items-end gap-6">
-    <label class="grid gap-1 text-small">
-      <span class="font-medium">Namespace</span>
-      <input type="text" name="namespace" value="{{ namespace }}" pattern="[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?" class="field w-48 font-mono">
-    </label>
-    <label class="inline-flex min-h-11 items-center gap-2 text-small">
-      <input type="checkbox" name="include_service" value="true" {% if include_service %}checked{% endif %}>
-      Generate Services
-    </label>
-    <button type="submit" class="btn btn-primary">Convert</button>
+<div class="flex flex-wrap items-end justify-between gap-4">
+  <div>
+    <h1 class="text-step-2 font-semibold">Docker Compose → Kubernetes</h1>
+    <p class="mt-1 max-w-measure text-ink-muted">Health checks become probes, <code class="font-mono">depends_on</code> becomes init containers, named volumes become claims. Only what your file needs is generated.</p>
   </div>
-</form>
+</div>
 
-{% if result is defined %}
-<section class="mt-8" aria-labelledby="result-heading">
-  <div class="flex flex-wrap items-center justify-between gap-2">
-    <h2 id="result-heading" class="text-step-1 font-semibold">Kubernetes manifests</h2>
-    <div class="flex gap-2">
-      <button type="button" data-copy="result" class="btn btn-secondary text-small">Copy</button>
-      <button type="button" data-download="result" data-filename="k8s.yaml" class="btn btn-secondary text-small">Download</button>
+<form method="post" action="/compose-to-k8s" enctype="multipart/form-data" class="mt-6 grid gap-6 lg:grid-cols-2" data-tool-form data-result-target="#result">
+  <section aria-labelledby="input-heading" class="grid content-start gap-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <h2 id="input-heading" class="font-mono text-small font-medium">docker-compose.yaml</h2>
+      <div class="flex flex-wrap gap-2">
+        <a href="/compose-to-k8s?example=1" class="btn btn-ghost btn-sm" data-load-example>{% include "icons/wand-sparkles.svg" %} Load an example</a>
+        <label class="btn btn-ghost btn-sm cursor-pointer">{% include "icons/upload.svg" %} Upload
+          <input type="file" name="compose_file" accept=".yaml,.yml,text/yaml,application/yaml" class="sr-only" data-file-input>
+        </label>
+      </div>
     </div>
-  </div>
-  <pre id="result" class="code mt-3">{{ result }}</pre>
-  {% if notes %}
-  <h3 class="mt-6 font-semibold">Notes</h3>
-  <ul class="mt-2 list-disc space-y-1 pl-6 text-small">
-    {% for note in notes %}<li>{{ note }}</li>{% endfor %}
-  </ul>
-  {% endif %}
-</section>
-{% endif %}
+    <div class="editor" data-editor data-placeholder="services:&#10;  web:&#10;    image: nginx&#10;    ports:&#10;      - &quot;8080:80&quot;">
+      <textarea name="compose_yaml" rows="18" spellcheck="false" aria-label="docker-compose.yaml" class="field font-mono text-small" data-editor-source>{{ compose_yaml }}</textarea>
+    </div>
+    <p class="text-small text-ink-muted">Drop a file onto the editor, or press <kbd class="rounded-sm border border-hairline px-1 font-mono">Ctrl</kbd>+<kbd class="rounded-sm border border-hairline px-1 font-mono">Enter</kbd> to convert.</p>
+
+    <div class="flex flex-wrap items-end gap-4 rounded-lg border border-divider bg-surface-raised p-4">
+      <label class="grid gap-1 text-small">
+        <span class="font-medium">Namespace</span>
+        <input type="text" name="namespace" value="{{ namespace }}" pattern="[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?" class="field w-44 font-mono">
+      </label>
+      <fieldset class="grid gap-1 text-small">
+        <legend class="font-medium">Output</legend>
+        <div class="flex gap-4 pt-1">
+          <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="output" value="manifests" {% if output != 'helm' %}checked{% endif %}> Manifests</label>
+          <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="output" value="helm" {% if output == 'helm' %}checked{% endif %}> Helm chart</label>
+        </div>
+      </fieldset>
+      <label class="inline-flex min-h-11 items-center gap-2 text-small">
+        <input type="checkbox" name="include_service" value="true" {% if include_service %}checked{% endif %}>
+        Services
+      </label>
+      <button type="submit" class="btn btn-primary ml-auto" data-submit>{% include "icons/play.svg" %} Convert</button>
+    </div>
+  </section>
+
+  <section aria-labelledby="result-heading" aria-live="polite" class="grid content-start gap-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <h2 id="result-heading" class="font-mono text-small font-medium">output</h2>
+      <button type="submit" class="btn btn-secondary btn-sm" formaction="/compose-to-k8s/zip" data-zip{% if not files %} hidden{% endif %}>{% include "icons/download.svg" %} Download all (.zip)</button>
+    </div>
+    <div id="result">
+      {% include "_result.html" %}
+    </div>
+  </section>
+</form>
 {% endblock %}

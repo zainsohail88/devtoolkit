@@ -1,16 +1,26 @@
 {% extends "base.html" %}
 {% block content %}
-<h1 class="text-step-3 font-semibold">DevOps conversion tools</h1>
-<p class="mt-2 max-w-measure text-ink-muted">Paste a file, get the converted output. Nothing is stored.</p>
+<section class="py-8 sm:py-12">
+  <span class="tag">{% include "icons/wand-sparkles.svg" %} Free, in the browser, no sign-up</span>
+  <h1 class="mt-4 text-step-3 font-semibold tracking-tight">DevToolkit</h1>
+  <p class="mt-3 max-w-measure text-step-1 text-ink-muted">Converters for infrastructure configs. Open source, nothing stored.</p>
+</section>
 
-<div class="mt-8 grid gap-4 sm:grid-cols-2">
-  <a href="/compose-to-k8s" class="card">
-    <h2 class="text-step-1 font-semibold">Docker Compose → Kubernetes</h2>
-    <p class="mt-1 text-small text-ink-muted">Turns a compose file into Deployments and Services, with notes on anything that needs a human decision.</p>
-  </a>
-  <a href="/validate-yaml" class="card">
-    <h2 class="text-step-1 font-semibold">YAML validator</h2>
-    <p class="mt-1 text-small text-ink-muted">Checks syntax and reports the line and column of the first error. Multi-document files are supported.</p>
-  </a>
-</div>
+<section aria-labelledby="tools-heading">
+  <h2 id="tools-heading" class="text-small font-medium uppercase tracking-wide text-ink-muted">Tools</h2>
+  <div class="mt-4 grid gap-4 sm:grid-cols-2">
+    <a href="/compose-to-k8s" class="card group">
+      <span class="inline-flex size-10 items-center justify-center rounded-md bg-accent-soft text-ink-on-accent-soft">{% include "icons/boxes.svg" %}</span>
+      <h3 class="mt-4 text-step-1 font-semibold">Docker Compose → Kubernetes</h3>
+      <p class="mt-1 text-small text-ink-muted">One file per resource, or a Helm chart. Health checks become probes, <code class="font-mono">depends_on</code> becomes init containers, named volumes become claims.</p>
+      <span class="mt-4 inline-flex items-center gap-1 text-small font-medium text-accent">Open <span class="transition-transform group-hover:translate-x-1">{% include "icons/arrow-right.svg" %}</span></span>
+    </a>
+    <a href="/validate-yaml" class="card group">
+      <span class="inline-flex size-10 items-center justify-center rounded-md bg-accent-soft text-ink-on-accent-soft">{% include "icons/file-check.svg" %}</span>
+      <h3 class="mt-4 text-step-1 font-semibold">YAML check</h3>
+      <p class="mt-1 text-small text-ink-muted">Finds the first syntax error and marks the exact line and column in the editor. Multi-document files are supported.</p>
+      <span class="mt-4 inline-flex items-center gap-1 text-small font-medium text-accent">Open <span class="transition-transform group-hover:translate-x-1">{% include "icons/arrow-right.svg" %}</span></span>
+    </a>
+  </div>
+</section>
 {% endblock %}
