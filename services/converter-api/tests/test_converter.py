@@ -294,6 +294,7 @@ def test_name_collision():
 
 
 def test_notes_for_manual_attention():
+    """Only what the conversion could not do for the user is left as a note."""
     compose = parse_compose(
         """
 services:
@@ -305,19 +306,23 @@ services:
     env_file: .env
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost"]
+  db:
+    image: postgres
+    ports: ["5432"]
 """
     )
     notes = " | ".join(convert_compose_to_k8s(compose)["notes"])
     for expected in [
         "renamed to 'web-app'",
-        "PersistentVolumeClaim",
-        "initContainers",
-        "service DNS",
-        "liveness/readiness",
+        "bind mount './data:/data' was not converted",
+        "reach each other by name",
         "env_file",
-        "no resource limits",
+        "placeholder requests",
     ]:
         assert expected in notes
+    # These were converted (probes, init container), so they are no longer notes.
+    for converted in ["healthcheck", "depends_on", "initContainers"]:
+        assert converted not in notes
 
 
 # --- input validation ------------------------------------------------------------------
@@ -575,11 +580,15 @@ def test_dict_env_null_vs_empty_string():
     assert "'B'" not in notes
 
 
-def test_limits_note_when_no_k8s_limits_generated():
+def test_placeholder_resources_when_no_k8s_limits_generated():
+    # `limits: {pids: 5}` has nothing Kubernetes can use, so it counts as no limits.
     compose = parse_compose(
         "services:\n  w:\n    image: x\n    deploy: {resources: {limits: {pids: 5}}}\n"
     )
-    assert "'w' has no resource limits" in convert_compose_to_k8s(compose)["notes"]
+    result = convert_compose_to_k8s(compose)
+    assert any(n.startswith("'w' had no resource limits: placeholder") for n in result["notes"])
+    container = result["manifests"]["deployments"][0]["spec"]["template"]["spec"]["containers"][0]
+    assert container["resources"]["limits"] == {"cpu": "500m", "memory": "512Mi"}
 
 
 @pytest.mark.parametrize(

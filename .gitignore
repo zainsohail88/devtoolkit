@@ -29,3 +29,7 @@ docker-compose.override.yml
 
 # Built by `make css` / the web Dockerfile
 services/web/static/app.css
+
+# Editor bundle: built by `make editor` / the web Dockerfile from services/web/editor
+services/web/static/vendor/
+node_modules/
