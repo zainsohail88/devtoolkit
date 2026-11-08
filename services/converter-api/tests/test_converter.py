@@ -589,3 +589,40 @@ def test_limits_note_when_no_k8s_limits_generated():
 def test_invalid_env_entries_rejected(environment, message):
     with pytest.raises(ComposeError, match=message):
         parse_environment(environment)
+
+
+def test_python_object_tags_are_rejected():
+    """The loaders are SafeLoader subclasses: YAML can never build Python objects."""
+    with pytest.raises(ComposeError, match="Invalid YAML: could not determine a constructor"):
+        parse_compose("services: !!python/object/apply:os.system ['echo pwned']")
+
+
+def test_load_yaml_documents_is_safe_and_multi_document():
+    from converters.compose_to_k8s import load_yaml_documents
+
+    assert load_yaml_documents("a: 1\n---\nb: [2, 3]\n") == [{"a": 1}, {"b": [2, 3]}]
+    assert load_yaml_documents("") == []
+    with pytest.raises(yaml.YAMLError):
+        load_yaml_documents("!!python/object/apply:os.system ['echo pwned']")
+
+
+def test_compose_error_message_is_the_user_text():
+    exc = ComposeError("Invalid memory value: 'lots'")
+    assert exc.message == "Invalid memory value: 'lots'" == str(exc)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [(" 512M ", "512Mi"), ("512 M", "512Mi"), ("1\tg", "1Gi")]
+)
+def test_convert_memory_tolerates_whitespace(value, expected):
+    assert convert_memory(value) == expected
+
+
+def test_convert_memory_rejects_long_whitespace_quickly():
+    """Linear-time regex: a pathological input is rejected at once, not after seconds."""
+    import time
+
+    started = time.perf_counter()
+    with pytest.raises(ComposeError):
+        convert_memory("0" + " " * 50_000 + "x")
+    assert time.perf_counter() - started < 1

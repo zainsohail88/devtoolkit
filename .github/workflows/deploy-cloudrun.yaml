@@ -74,18 +74,32 @@ jobs:
           API_SHA: ${{ inputs.converter_api_sha }}
           WEB_SHA: ${{ inputs.web_sha }}
         run: |
+          # Newest commit on main that changed the service AND has a published image. Images
+          # are only built for commits that change a service, and older history may predate
+          # publishing, so walk back until one exists.
+          newest_built() {
+            local service="$1" sha
+            while read -r sha; do
+              if docker manifest inspect "ghcr.io/${GITHUB_REPOSITORY,,}/${service}:${sha}" > /dev/null 2>&1; then
+                echo "$sha"
+                return 0
+              fi
+            done < <(git log -20 --format=%H -- "services/${service}/")
+            echo "::error::No published image for any of the last 20 commits that changed services/${service}/. Run 'Build and push images' on main first." >&2
+            return 1
+          }
           # Prints the image to deploy for a service, or nothing to leave it as it is.
           resolve() {
             local service="$1" image="$2" sha="$3" tag
             if [[ -n "$image" ]]; then
               tag="${image##*:}"
+            elif [[ -n "$sha" ]]; then
+              tag="$sha"
             elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-              # Images are only built for commits that change the service, so by default
-              # pick the newest such commit.
-              tag="${sha:-$(git log -1 --format=%H -- "services/${service}/")}"
+              tag="$(newest_built "$service")" || return 1
             elif ! gcloud run services describe "$service" --region "$REGION" --format='value(name)' > /dev/null 2>&1; then
               echo "$service does not exist in Cloud Run yet; deploying it too." >&2
-              tag="$(git log -1 --format=%H -- "services/${service}/")"
+              tag="$(newest_built "$service")" || return 1
             else
               return 0
             fi

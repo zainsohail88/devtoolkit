@@ -149,3 +149,22 @@ def test_configure_logging_warns_on_unknown_level(caplog):
     with caplog.at_level(logging.WARNING, logger="converter-api"):
         assert configure_logging("loud") == "INFO"
     assert "Unknown LOG_LEVEL 'loud'" in caplog.text
+
+
+def test_validate_yaml_rejects_python_tags():
+    response = client.post(
+        "/validate/yaml", json={"yaml": "!!python/object/apply:os.system ['echo pwned']"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["valid"] is False
+    assert body["error"].startswith("Invalid YAML: could not determine a constructor")
+
+
+def test_convert_rejects_python_tags():
+    response = client.post(
+        "/convert/compose-to-k8s",
+        json={"compose_yaml": "services: !!python/object/apply:os.system ['echo pwned']"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"].startswith("Invalid YAML")
