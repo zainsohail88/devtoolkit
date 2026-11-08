@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+from html.parser import HTMLParser
 
 import httpx
 import pytest
@@ -20,6 +21,34 @@ from main import (
 
 COMPOSE = 'services:\n  web:\n    image: nginx\n    ports:\n      - "8080:80"\n'
 K8S_YAML = "apiVersion: apps/v1\nkind: Deployment\n"
+
+
+class _InlineScripts(HTMLParser):
+    """Collects the text of every <script> element without a src attribute."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scripts: list[str] = []
+        self._inside = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script" and dict(attrs).get("src") is None:
+            self._inside = True
+            self.scripts.append("")
+
+    def handle_data(self, data: str) -> None:
+        if self._inside:
+            self.scripts[-1] += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script":
+            self._inside = False
+
+
+def inline_scripts(html: str) -> list[str]:
+    parser = _InlineScripts()
+    parser.feed(html)
+    return parser.scripts
 
 
 def test_probes(client):
@@ -49,7 +78,7 @@ def test_security_headers_on_every_response(client):
 def test_inline_theme_script_is_allowed_by_csp(client):
     """The CSP has no 'unsafe-inline'; the one inline script must match the hash exactly."""
     html = client.get("/").text
-    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    scripts = inline_scripts(html)
     assert len(scripts) == 1
     digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode()
     assert f"'sha256-{digest}'" in SECURITY_HEADERS["Content-Security-Policy"]
@@ -282,8 +311,11 @@ def test_output_is_escaped(client, fake_api):
     assert "<script>alert(1)</script>" not in response.text
     assert "&lt;script&gt;" in response.text
     assert "<img src=x" not in response.text
-    # Still exactly one inline script on the page: the theme one.
-    assert len(re.findall(r"<script>", response.text)) == 1
+    # Still exactly one inline script on the page: the theme one. The parser also proves the
+    # escaped text above is page text, not a script element.
+    scripts = inline_scripts(response.text)
+    assert len(scripts) == 1
+    assert "alert(1)" not in scripts[0]
 
 
 def test_validate_form_renders(client):
