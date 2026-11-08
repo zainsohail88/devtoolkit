@@ -21,9 +21,10 @@ services/
   web/                    FastAPI + Jinja2 service: the pages
     main.py               Routes, form handling, security headers
     api_client.py         Calls converter-api (with a Google identity token on Cloud Run)
-    templates/            Jinja2 templates
-    static/               app.js (copy/download buttons); app.css is built from styles/
-    styles/input.css      Tailwind source, compiled by the Dockerfile or `make css`
+    templates/            Jinja2 templates: index, the two tools, error page
+    static/               app.js (theme toggle, copy/download); app.css is built from styles/
+    styles/input.css      The design system: every colour, size and radius as a token, light
+                          and dark values, and the component classes. Compiled by Tailwind.
     tests/                pytest tests; converter-api is replaced by a fake
     Dockerfile            Multi-stage build: Python deps, Tailwind CLI, runtime
 k8s/

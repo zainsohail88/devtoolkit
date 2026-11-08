@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from main import MAX_BODY_BYTES, MAX_INPUT_CHARS, SECURITY_HEADERS, create_app
+from main import (
+    HTML_CACHE,
+    MAX_BODY_BYTES,
+    MAX_INPUT_CHARS,
+    SECURITY_HEADERS,
+    STATIC_CACHE,
+    create_app,
+    static_url,
+)
 
 COMPOSE = 'services:\n  web:\n    image: nginx\n    ports:\n      - "8080:80"\n'
 K8S_YAML = "apiVersion: apps/v1\nkind: Deployment\n"
@@ -28,10 +40,70 @@ def test_no_api_docs_exposed(client):
 
 
 def test_security_headers_on_every_response(client):
-    for path in ("/", "/compose-to-k8s", "/health", "/static/app.js"):
+    for path in ("/", "/compose-to-k8s", "/health", "/static/app.js", "/nope"):
         headers = client.get(path).headers
         for name, value in SECURITY_HEADERS.items():
             assert headers[name] == value, (path, name)
+
+
+def test_inline_theme_script_is_allowed_by_csp(client):
+    """The CSP has no 'unsafe-inline'; the one inline script must match the hash exactly."""
+    html = client.get("/").text
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    assert len(scripts) == 1
+    digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode()
+    assert f"'sha256-{digest}'" in SECURITY_HEADERS["Content-Security-Policy"]
+    assert "'unsafe-inline'" not in SECURITY_HEADERS["Content-Security-Policy"]
+    assert 'localStorage.getItem("theme")' in scripts[0]
+
+
+def test_cache_headers(client):
+    assert client.get("/").headers["Cache-Control"] == HTML_CACHE
+    assert client.get("/nope").headers["Cache-Control"] == HTML_CACHE
+    assert client.get("/static/app.js").headers["Cache-Control"] == STATIC_CACHE
+    assert "Cache-Control" not in client.get("/health").headers
+
+
+def test_static_urls_are_versioned_by_content(client):
+    html = client.get("/").text
+    assert re.search(r'src="/static/app\.js\?v=[0-9a-f]{8}"', html)
+    # app.css is built by `make css` / the Dockerfile and may be absent here; the page still works.
+    assert re.search(r'href="/static/app\.css\?v=([0-9a-f]{8}|0)"', html)
+    assert static_url("does-not-exist.css") == "/static/does-not-exist.css?v=0"
+
+
+def test_page_structure_and_theme_toggle(client):
+    html = client.get("/compose-to-k8s").text
+    assert '<html lang="en">' in html
+    assert 'href="#main"' in html and 'id="main"' in html  # skip link and its target
+    assert html.count("<h1") == 1
+    assert "<nav" in html and "<main" in html and "<footer" in html
+    assert "data-theme-toggle hidden" in html  # shown only once app.js has wired it up
+    assert 'href="/compose-to-k8s" class="nav-link" aria-current="page"' in html
+    assert 'href="/validate-yaml" class="nav-link">' in html
+
+
+def test_404_page_has_a_way_back(client):
+    response = client.get("/no-such-page")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("text/html")
+    assert "There is no page at this address." in response.text
+    assert 'href="/"' in response.text
+
+
+def test_405_page(client):
+    response = client.post("/", content=b"", headers={"Content-Length": "0"})
+    assert response.status_code == 405
+    assert "isn&#39;t allowed here" in response.text
+
+
+def test_malformed_form_gets_an_html_error(client, fake_api):
+    response = client.post(
+        "/compose-to-k8s", data={"compose_yaml": COMPOSE, "include_service": "maybe"}
+    )
+    assert response.status_code == 400
+    assert "wasn&#39;t filled in correctly" in response.text
+    assert fake_api.requests == []
 
 
 def test_compose_form_renders(client):
@@ -210,6 +282,8 @@ def test_output_is_escaped(client, fake_api):
     assert "<script>alert(1)</script>" not in response.text
     assert "&lt;script&gt;" in response.text
     assert "<img src=x" not in response.text
+    # Still exactly one inline script on the page: the theme one.
+    assert len(re.findall(r"<script>", response.text)) == 1
 
 
 def test_validate_form_renders(client):
@@ -300,3 +374,23 @@ def test_configure_logging_warns_on_unknown_level(caplog):
     with caplog.at_level("WARNING", logger="web"):
         assert configure_logging("loud") == "INFO"
     assert "Unknown LOG_LEVEL 'loud'" in caplog.text
+
+
+def test_other_http_errors_render_the_error_page(fake_api):
+    from fastapi import HTTPException
+
+    from api_client import ApiClient
+
+    api = ApiClient("http://converter-api", transport=httpx.MockTransport(fake_api.handler))
+    app = create_app(api)
+
+    @app.get("/boom")
+    def boom() -> None:
+        raise HTTPException(503, "Down for maintenance")
+
+    with TestClient(app) as client:
+        response = client.get("/boom")
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Down for maintenance" in response.text
+    assert 'href="/"' in response.text

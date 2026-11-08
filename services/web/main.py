@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import os
 import re
@@ -11,9 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Form, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api_client import ApiClient, ApiUnavailableError
 
@@ -51,17 +55,49 @@ MAX_BODY_BYTES = 4 * MAX_INPUT_CHARS + 16_384
 NAMESPACE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
 UNAVAILABLE = "The converter is unavailable right now. Please try again in a minute."
 
+# Applies a saved theme choice before first paint, so the page never flashes the wrong theme.
+# It must be inline (a deferred script is too late), so the CSP allows exactly this script by
+# hash. Change the text here and the hash follows.
+THEME_SCRIPT = (
+    'try{var t=localStorage.getItem("theme");'
+    'if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}'
+    "catch(e){}"
+)
+THEME_SCRIPT_HASH = base64.b64encode(hashlib.sha256(THEME_SCRIPT.encode()).digest()).decode()
+
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-        "form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+        f"default-src 'self'; script-src 'self' 'sha256-{THEME_SCRIPT_HASH}'; style-src 'self'; "
+        "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; "
+        "object-src 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
 }
+# Static URLs carry a content hash, so files can be cached for a year and a new build still
+# shows up at once. HTML must never be cached: its URL stays the same while its content changes.
+STATIC_CACHE = "public, max-age=31536000, immutable"
+HTML_CACHE = "public, max-age=0, must-revalidate"
+
+_static_versions: dict[str, str] = {}
+
+
+def static_url(name: str) -> str:
+    """URL for a file in static/, versioned by its content. A missing file (e.g. app.css before
+    `make css`) gets version 0 rather than breaking the page."""
+    if name not in _static_versions:
+        try:
+            digest = hashlib.sha256((BASE_DIR / "static" / name).read_bytes()).hexdigest()
+            _static_versions[name] = digest[:8]
+        except OSError:
+            _static_versions[name] = "0"
+    return f"/static/{name}?v={_static_versions[name]}"
+
 
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+templates.env.globals["theme_script"] = THEME_SCRIPT
+templates.env.globals["static_url"] = static_url
 
 
 class InputError(Exception):
@@ -114,12 +150,38 @@ def create_app(api: ApiClient | None = None) -> FastAPI:
                 return PlainTextResponse("Request too large", status_code=413)
         response = await call_next(request)
         response.headers.update(SECURITY_HEADERS)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = STATIC_CACHE
+        elif response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = HTML_CACHE
         return response
 
     def page(
         request: Request, name: str, context: dict[str, Any], status_code: int = 200
     ) -> HTMLResponse:
         return templates.TemplateResponse(request, name, context, status_code=status_code)
+
+    # Error pages with a way back, instead of FastAPI's JSON.
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> HTMLResponse:
+        if exc.status_code == 404:
+            message = "There is no page at this address."
+        elif exc.status_code == 405:
+            message = "That request method isn't allowed here."
+        else:
+            message = str(exc.detail)  # Starlette always sets it, at least to the status phrase
+        return page(
+            request, "error.html", {"status": exc.status_code, "message": message}, exc.status_code
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def form_error(request: Request, exc: RequestValidationError) -> HTMLResponse:
+        return page(
+            request,
+            "error.html",
+            {"status": 400, "message": "The form wasn't filled in correctly."},
+            400,
+        )
 
     @app.get("/health")
     def health() -> dict[str, str]:

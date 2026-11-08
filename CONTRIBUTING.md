@@ -39,6 +39,19 @@ Example: adding a CloudFormation to Terraform converter.
 - **Docstrings** on public functions. Say what it does and give an example if the input format is non-obvious.
 - **Comments explain why**, not what. Plain words, no buzzwords.
 
+## Web UI rules
+
+The design system is one file: `services/web/styles/input.css`. Every colour, size, radius and font is a token there, named for its job (`surface`, `ink`, `accent`), with light and dark values side by side.
+
+- **No raw values in templates.** Use token classes (`bg-surface`, `text-ink-muted`, `border-hairline`, `rounded-sm`, `text-step-1`) and the component classes (`btn`, `card`, `field`, `alert`, `code`, `nav-link`). Tailwind's own palette, radii and text sizes are removed, so `bg-slate-50` or `rounded-lg` produce no CSS at all. If you need a value the tokens lack, add a token.
+- **One component per concept.** A variant is a modifier class (`btn-primary`), not a new component.
+- **Both themes.** New colours get a light and a dark value, checked for contrast: 4.5:1 for text, 3:1 for interface borders. The two dark blocks in `input.css` must stay identical.
+- **Keyboard and motion.** Anything clickable is at least 44px tall (`min-h-11`), focus stays visible, and animation respects `prefers-reduced-motion` (already handled globally).
+- **Scripts.** `app.js` is the only JavaScript, and every page must work without it. The one inline script (theme before first paint) is allowed by hash in the Content-Security-Policy; don't add others.
+- **Copy.** Lead with the result, no filler, no em dashes, and prefer the smaller true claim.
+
+`make css` rebuilds `static/app.css`; the Dockerfile does the same during the image build.
+
 ## Kubernetes manifest rules
 
 Every container must have:
