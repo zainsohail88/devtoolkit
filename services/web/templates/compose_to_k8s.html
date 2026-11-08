@@ -20,7 +20,7 @@
   <div class="flex flex-wrap items-end gap-6">
     <label class="grid gap-1 text-small">
       <span class="font-medium">Namespace</span>
-      <input type="text" name="namespace" value="{{ namespace }}" pattern="[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?" class="field w-48 font-mono">
+      <input type="text" name="namespace" value="{{ namespace }}" pattern="[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?" class="field w-48 font-mono">
     </label>
     <label class="inline-flex min-h-11 items-center gap-2 text-small">
       <input type="checkbox" name="include_service" value="true" {% if include_service %}checked{% endif %}>

@@ -394,3 +394,10 @@ def test_other_http_errors_render_the_error_page(fake_api):
     assert response.headers["content-type"].startswith("text/html")
     assert "Down for maintenance" in response.text
     assert 'href="/"' in response.text
+
+
+def test_namespace_pattern_is_valid_under_the_browser_v_flag(client):
+    """Browsers compile the pattern attribute with the regex v flag, where a hyphen inside a
+    character class must be escaped. An unescaped one makes the browser drop the pattern."""
+    html = client.get("/compose-to-k8s").text
+    assert 'pattern="[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?"' in html
