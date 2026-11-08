@@ -169,8 +169,10 @@ jobs:
             localhost:8080/compose-to-k8s | tee /tmp/convert.html | grep -q 'kind: Deployment'
       - name: converter-api is reachable from web only
         run: |
-          # Single quotes only: this string is also embedded in the JSON below.
-          check="import urllib.request; urllib.request.urlopen('http://converter-api:8000/health', timeout=5); print('REACHED')"
+          # Single quotes only: this string is also embedded in the JSON below. The marker is
+          # split in two ('RE' 'ACHED') because a failed probe's traceback quotes this source
+          # line, and the marker must only appear when the request really succeeded.
+          check="import urllib.request; urllib.request.urlopen('http://converter-api:8000/health', timeout=5); print('RE' 'ACHED')"
           echo "From a web pod (must work):"
           kubectl -n devtoolkit exec deployment/web -- python -c "$check" | grep -q REACHED
           echo "From any other pod (must be blocked by the NetworkPolicy):"
@@ -186,10 +188,11 @@ jobs:
                                     "command": ["python", "-c", "$check"]}]}}
           EOF
           )
+          rc=0
           out=$(kubectl -n devtoolkit run probe --rm -i --restart=Never --image="$WEB_IMAGE" \
-                  --overrides="$overrides" 2>&1 || true)
+                  --overrides="$overrides" 2>&1) || rc=$?
           echo "$out"
-          if grep -q REACHED <<< "$out"; then
+          if [[ "$rc" -eq 0 ]] || grep -q REACHED <<< "$out"; then
             echo "::error::A pod without the web label reached converter-api. The NetworkPolicy is not enforced."
             exit 1
           fi
