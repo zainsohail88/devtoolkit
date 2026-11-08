@@ -1,0 +1,118 @@
+name: Deploy to Cloud Run
+
+# The maintainers' public deployment. Runs automatically from ci.yaml after an image for a
+# new commit on main is published, and can be run by hand (on main) to redeploy or roll back.
+# Skipped entirely until the repository variables below are set, so forks are unaffected:
+#   GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT,
+#   CLOUD_RUN_SERVICE, CLOUD_RUN_REGION, CLOUD_RUN_SERVICE_ACCOUNT
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: "Image to deploy, tagged with a commit SHA"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Full commit SHA of the image to deploy (empty = latest commit that changed services/)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write # lets GitHub request a short-lived token from Google (Workload Identity)
+
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # Only reviewed code that reached main may be deployed.
+      - name: Only deploy from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Deploys must run on main (this run is on ${GITHUB_REF})."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Work out image
+        id: image
+        env:
+          INPUT_IMAGE: ${{ inputs.image }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          name="ghcr.io/${GITHUB_REPOSITORY,,}/converter-api"
+          if [[ -n "$INPUT_IMAGE" ]]; then
+            ref="$INPUT_IMAGE"
+            tag="${ref##*:}"
+          else
+            # Images are only built for commits that change services/, so by default pick
+            # the newest such commit.
+            tag="${INPUT_TAG:-$(git log -1 --format=%H -- services/)}"
+            ref="${name}:${tag}"
+          fi
+          if ! [[ "$tag" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Image tag must be a full 40-character commit SHA, got '$tag'"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag" HEAD 2>/dev/null; then
+            echo "::error::Commit $tag is not on main. Only commits merged to main can be deployed."
+            exit 1
+          fi
+          echo "Deploying $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check the image exists
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          if ! docker manifest inspect "$IMAGE_REF" > /dev/null; then
+            echo "::error::No image $IMAGE_REF. Its CI run may have failed, or it was never built on main."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (Workload Identity, no keys)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      # Cloud Run pulls the public image straight from GitHub Container Registry.
+      # Scales to zero when idle; max-instances caps cost (there is no rate limiting yet).
+      - name: Deploy
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          region: ${{ vars.CLOUD_RUN_REGION }}
+          service: ${{ vars.CLOUD_RUN_SERVICE }}
+          image: ${{ steps.image.outputs.ref }}
+          env_vars: |-
+            LOG_LEVEL=info
+          flags: >-
+            --port=8000
+            --cpu=1
+            --memory=512Mi
+            --min-instances=0
+            --max-instances=2
+            --concurrency=80
+            --service-account=${{ vars.CLOUD_RUN_SERVICE_ACCOUNT }}
+            --allow-unauthenticated
+
+      - name: Smoke test the live service
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS "$URL/health"; then echo; echo "Live at $URL"; exit 0; fi
+            sleep 3
+          done
+          echo "::error::$URL/health did not respond after deploy"
+          exit 1

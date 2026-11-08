@@ -13,7 +13,7 @@ k8s/
   namespace.yaml          devtoolkit namespace
   converter-api/          Deployment, Service, ConfigMap
 .github/
-  workflows/              CI, image publishing, GKE deploy, CodeQL
+  workflows/              CI, image publishing, Cloud Run and GKE deploys, CodeQL
   CODEOWNERS, dependabot.yml, issue and PR templates
 scripts/                  build.sh, deploy-local.sh, image-name.sh, kind-cluster.yaml
 docs/                     This documentation

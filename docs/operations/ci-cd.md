@@ -8,7 +8,8 @@ All automation runs in GitHub Actions, from `.github/workflows/`.
 |----------|-----------|--------------|
 | `ci.yaml` | PR to `main`, push to `main` | Lint, tests, Docker build, manifest validation, deploy to a real cluster (jobs below) |
 | `build-push.yaml` | Called by CI on `main` after every check passes, if `services/**` changed. Can also be run by hand. | Builds and pushes the image to GitHub Container Registry |
-| `deploy-gke.yaml` | Manual only, from `main` | The maintainers' production deploy. You don't need it to run DevToolkit: see [Deploying to your cluster](deploy.md). |
+| `deploy-cloudrun.yaml` | Called by CI on `main` after a new image is published. Can also be run by hand on `main` to redeploy or roll back. | The maintainers' public deployment, on Google Cloud Run. Skipped unless its repository variables are set, so forks are unaffected. |
+| `deploy-gke.yaml` | Manual only, from `main` | Alternative deploy to a GKE cluster, kept for a future move to Kubernetes in production. |
 | `codeql.yaml` | PR to `main`, push to `main`, weekly | Security scan of the Python code and the workflow files |
 
 ### CI jobs
@@ -20,6 +21,8 @@ All automation runs in GitHub Actions, from `.github/workflows/`.
 | `build` | Builds the Docker image, starts it, and checks `/health` responds |
 | `validate-k8s` | [kubeconform](https://github.com/yannh/kubeconform) `-strict` on `k8s/` (the maintained successor to kubeval) |
 | `e2e` | Creates a [kind](https://kind.sigs.k8s.io/) cluster from `scripts/kind-cluster.yaml` (the same one as `make cluster-up`), deploys `k8s/`, waits for the rollout, then calls `/health`, `/ready` and a conversion through the Service |
+
+You don't need either deploy workflow to run DevToolkit yourself: see [Deploying to your cluster](deploy.md).
 
 PR runs that get superseded by a newer push are cancelled. Runs on `main` always finish, so every passing commit gets its image.
 
