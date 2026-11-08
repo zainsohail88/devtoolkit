@@ -155,3 +155,13 @@ jobs:
       contents: read
       packages: write
     uses: ./.github/workflows/build-push.yaml
+
+  deploy:
+    needs: publish
+    if: needs.publish.outputs.built == 'true' && vars.CLOUD_RUN_SERVICE != ''
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy-cloudrun.yaml
+    with:
+      image: ${{ needs.publish.outputs.image }}
