@@ -3,15 +3,20 @@ name: Build and push images
 # Not triggered by pushes directly. ci.yaml calls this only after every check has passed
 # on main, so a broken commit never gets an image (or overwrites :latest). It can also be
 # run by hand, but only on main: images from other branches would skip CI and review.
+#
+# One job per service. Each builds only if its own services/<name>/ directory changed.
 on:
   workflow_call:
     outputs:
       built:
-        description: "'true' if a new image was pushed for this commit"
-        value: ${{ jobs.converter-api.outputs.built }}
-      image:
-        description: "The pushed image, tagged with the commit SHA"
+        description: "'true' if at least one image was pushed for this commit"
+        value: ${{ jobs.converter-api.outputs.built == 'true' || jobs.web.outputs.built == 'true' }}
+      converter_api_image:
+        description: "The pushed converter-api image, tagged with the commit SHA (empty if not built)"
         value: ${{ jobs.converter-api.outputs.image }}
+      web_image:
+        description: "The pushed web image, tagged with the commit SHA (empty if not built)"
+        value: ${{ jobs.web.outputs.image }}
   workflow_dispatch:
 
 permissions:
@@ -25,6 +30,8 @@ concurrency:
 jobs:
   converter-api:
     runs-on: ubuntu-latest
+    env:
+      SERVICE: converter-api
     outputs:
       built: ${{ steps.changes.outputs.build }}
       image: ${{ steps.image.outputs.ref }}
@@ -39,27 +46,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Did services/ change?
+      - name: Did services/${{ env.SERVICE }}/ change?
         id: changes
         env:
           BEFORE: ${{ github.event.before }}
         run: |
-          # Manual runs always build. On a push, build only if services/** changed.
+          # Manual runs always build. On a push, build only if this service changed.
           if [[ "$GITHUB_EVENT_NAME" != "push" ]] \
             || [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]] \
             || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null \
-            || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- services/; then
+            || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- "services/${SERVICE}/"; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "No changes under services/, skipping image build."
+            echo "No changes under services/${SERVICE}/, skipping image build."
           fi
 
       - name: Image tags
         if: steps.changes.outputs.build == 'true'
         id: image
         run: |
-          name="ghcr.io/${GITHUB_REPOSITORY,,}/converter-api"  # registry paths must be lowercase
+          name="ghcr.io/${GITHUB_REPOSITORY,,}/${SERVICE}"  # registry paths must be lowercase
           tags="${name}:${GITHUB_SHA}"
           # CI runs for consecutive commits can finish out of order. Only move :latest if this
           # commit is still the tip of main, so an older build never overwrites a newer one.
@@ -86,12 +93,83 @@ jobs:
       - if: steps.changes.outputs.build == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: services/converter-api
+          context: services/${{ env.SERVICE }}
           push: true
           tags: ${{ steps.image.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.SERVICE }}
+          cache-to: type=gha,mode=max,scope=${{ env.SERVICE }}
+
+  web:
+    runs-on: ubuntu-latest
+    env:
+      SERVICE: web
+    outputs:
+      built: ${{ steps.changes.outputs.build }}
+      image: ${{ steps.image.outputs.ref }}
+    steps:
+      - name: Only build from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Images are only built from main (this run is on ${GITHUB_REF})."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Did services/${{ env.SERVICE }}/ change?
+        id: changes
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != "push" ]] \
+            || [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]] \
+            || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null \
+            || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- "services/${SERVICE}/"; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "No changes under services/${SERVICE}/, skipping image build."
+          fi
+
+      - name: Image tags
+        if: steps.changes.outputs.build == 'true'
+        id: image
+        run: |
+          name="ghcr.io/${GITHUB_REPOSITORY,,}/${SERVICE}"
+          tags="${name}:${GITHUB_SHA}"
+          git fetch --quiet origin main
+          if [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]; then
+            tags="${tags},${name}:latest"
+          else
+            echo "main has moved past ${GITHUB_SHA}; pushing the SHA tag only."
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "ref=${name}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - if: steps.changes.outputs.build == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - if: steps.changes.outputs.build == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - if: steps.changes.outputs.build == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: services/${{ env.SERVICE }}
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=${{ env.SERVICE }}
+          cache-to: type=gha,mode=max,scope=${{ env.SERVICE }}

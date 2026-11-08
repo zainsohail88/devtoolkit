@@ -1,0 +1,4 @@
+/* Tailwind source. The Docker build compiles this to static/app.css (see Dockerfile).
+   Locally: make css */
+@import "tailwindcss" source(none);
+@source "../templates";

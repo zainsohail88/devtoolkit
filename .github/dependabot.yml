@@ -7,7 +7,9 @@
 version: 2
 updates:
   - package-ecosystem: pip
-    directory: /services/converter-api
+    directories:
+      - /services/converter-api
+      - /services/web
     schedule:
       interval: weekly
     groups:
@@ -31,7 +33,9 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: docker
-    directory: /services/converter-api
+    directories:
+      - /services/converter-api
+      - /services/web
     schedule:
       interval: weekly
     groups:
