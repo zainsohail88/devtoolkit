@@ -8,3 +8,5 @@ htmlcov/
 requirements-dev.txt
 pyproject.toml
 static/app.css
+static/vendor/
+editor/node_modules/

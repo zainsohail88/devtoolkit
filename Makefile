@@ -6,7 +6,7 @@ KIND_VERSION := $(shell awk '$$1 == "kind" {print $$2}' .tool-versions)
 TAILWIND_VERSION := $(shell sed -n -E 's/^ARG TAILWIND_VERSION=(.*)/\1/p' services/web/Dockerfile)
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test run run-web css build validate-k8s cluster-up cluster-down deploy-local port-forward clean
+.PHONY: help install lint format test run run-web css editor build validate-k8s cluster-up cluster-down deploy-local port-forward clean
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -29,8 +29,11 @@ test: ## Run every service's tests with coverage
 run: ## Run the API locally with auto-reload (http://localhost:8000/docs)
 	cd services/converter-api && ../../$(BIN)/uvicorn main:app --reload --port 8000
 
-run-web: css ## Run the web UI locally with auto-reload (http://localhost:8080), expects `make run` in another terminal
+run-web: css editor ## Run the web UI locally with auto-reload (http://localhost:8080), expects `make run` in another terminal
 	cd services/web && ../../$(BIN)/uvicorn main:app --reload --port 8080
+
+editor: ## Bundle the code editor into services/web/static/vendor/editor.js (needs Node.js 22)
+	cd services/web/editor && npm ci --no-audit --no-fund && npm run build
 
 css: ## Build services/web/static/app.css with the Tailwind CLI (downloaded to .venv/bin on first use)
 	@test -x $(BIN)/tailwindcss || { \

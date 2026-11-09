@@ -37,7 +37,8 @@ PR runs that get superseded by a newer push are cancelled. Runs on `main` always
 |------|-----|
 | Pinned actions | Every third-party action is pinned to a full commit SHA (with the version in a comment), so a moved or hijacked tag can't change what runs |
 | Pinned Tailwind CLI | The `web` Dockerfile downloads a fixed version and checks its SHA-256 before using it |
-| Dependabot | Weekly update PRs for both services' Python packages and Docker base images, and for GitHub Actions. Minor and patch bumps are grouped; major bumps get their own PR. |
+| Locked editor bundle | The code editor's npm dependencies are pinned exactly in `services/web/editor/package-lock.json` and installed with `npm ci`; the bundle is built in the image, never committed |
+| Dependabot | Weekly update PRs for both services' Python packages and Docker base images, the editor's npm packages, and GitHub Actions. Minor and patch bumps are grouped; major bumps get their own PR. |
 | CodeQL | `security-extended` queries on Python and on the workflows, e.g. to catch script injection |
 | CODEOWNERS | `.github/` changes need the repo owner's review |
 | Least privilege | Workflows get read-only tokens by default and request `packages: write` or `id-token: write` only in the job that needs it |

@@ -1,4 +1,8 @@
-"""Convert docker-compose (v3) files into Kubernetes Deployment and Service manifests.
+"""Convert docker-compose (v3) files into Kubernetes manifests.
+
+Each service becomes a Deployment (with probes from `healthcheck`, init containers from
+`depends_on`, volume mounts from `volumes`) and, if it has ports, a Service. Named volumes
+become PersistentVolumeClaims. Only what the compose file needs is generated.
 
 Example:
     compose = parse_compose(open("docker-compose.yaml").read())
@@ -9,6 +13,7 @@ Example:
 
 from __future__ import annotations
 
+import copy
 import math
 import re
 import shlex
@@ -134,9 +139,12 @@ class ComposeError(ValueError):
     input and never includes internal details.
     """
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, line: int | None = None, column: int | None = None) -> None:
         super().__init__(message)
         self.message = message
+        # 1-based position in the input, when the error is a YAML syntax error.
+        self.line = line
+        self.column = column
 
 
 def parse_compose(yaml_string: str) -> dict[str, Any]:
@@ -155,7 +163,10 @@ def parse_compose(yaml_string: str) -> dict[str, Any]:
         # `problem` is the parser's description of the input ("mapping values are not
         # allowed here"). Nothing else from the exception reaches the user.
         problem = getattr(exc, "problem", None) or "syntax error"
-        raise ComposeError(f"Invalid YAML: {problem}") from exc
+        mark = getattr(exc, "problem_mark", None)
+        line = mark.line + 1 if mark is not None else None
+        column = mark.column + 1 if mark is not None else None
+        raise ComposeError(f"Invalid YAML: {problem}", line, column) from exc
 
     check_node_count(data)
 
@@ -422,13 +433,261 @@ def _service_ports(name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
     return ports + parse_ports(_expect_list(config.get("expose"), "expose", name))
 
 
+# Placeholder resources, added when a service declares none. Kubernetes schedules an
+# unbounded pod otherwise; the note tells the user these are starting points.
+DEFAULT_REQUESTS = {"cpu": "100m", "memory": "128Mi"}
+DEFAULT_LIMITS = {"cpu": "500m", "memory": "512Mi"}
+# Named volumes become PersistentVolumeClaims of this size; the note says to adjust it.
+DEFAULT_VOLUME_SIZE = "1Gi"
+# Init containers that wait for a dependency's port. Pinned, tiny, has `nc`.
+WAIT_IMAGE = "busybox:1.37"
+
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)(ms|us|µs|ns|h|m|s)")
+_DURATION_SECONDS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1, "m": 60, "h": 3600}
+_BIND_PREFIXES = ("/", "./", "../", "~")
+
+
+def _is_true(value: Any) -> bool:
+    """Compose booleans. The loader keeps scalars as text, so `true` arrives as "true"."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "yes", "on", "1")
+
+
+def parse_duration(value: Any, field: str, service: str) -> int:
+    """Compose duration ('1m30s', '500ms', '10s', or a plain number of seconds) to whole
+    seconds, rounded up and at least 1, since Kubernetes probes take integer seconds."""
+    if isinstance(value, bool):
+        raise ComposeError(f"Service '{service}': invalid duration in '{field}': '{value}'")
+    text = str(value).strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        seconds = float(text)
+    else:
+        matches = _DURATION.findall(text)
+        if not text or "".join(n + u for n, u in matches) != text.replace(" ", ""):
+            raise ComposeError(f"Service '{service}': invalid duration in '{field}': '{value}'")
+        seconds = sum(float(n) * _DURATION_SECONDS[u] for n, u in matches)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ComposeError(f"Service '{service}': invalid duration in '{field}': '{value}'")
+    return max(1, math.ceil(seconds))
+
+
+def convert_healthcheck(name: str, config: dict[str, Any]) -> dict[str, Any] | None:
+    """Compose `healthcheck` -> one probe spec (used for both liveness and readiness).
+
+    Returns None when there is no usable healthcheck (missing, `disable: true`, or NONE).
+    """
+    check = config.get("healthcheck")
+    if not check:
+        return None
+    check = _expect_mapping(check, "healthcheck", name)
+    if _is_true(check.get("disable", False)):
+        return None
+    test = check.get("test")
+    if test is None:
+        return None
+    if isinstance(test, list):
+        parts = [str(p) for p in test]
+        if not parts or parts[0] == "NONE":
+            return None
+        if parts[0] == "CMD":
+            command = parts[1:]
+        elif parts[0] == "CMD-SHELL":
+            command = ["sh", "-c", " ".join(parts[1:])]
+        else:
+            command = parts
+    else:
+        command = ["sh", "-c", str(test)]
+    if not command:
+        return None
+
+    probe: dict[str, Any] = {"exec": {"command": command}}
+    if check.get("interval") is not None:
+        probe["periodSeconds"] = parse_duration(check["interval"], "healthcheck.interval", name)
+    if check.get("timeout") is not None:
+        probe["timeoutSeconds"] = parse_duration(check["timeout"], "healthcheck.timeout", name)
+    if check.get("retries") is not None:
+        retries = check["retries"]
+        text = str(retries).strip()
+        if isinstance(retries, bool) or not _DIGITS.fullmatch(text) or int(text) < 1:
+            raise ComposeError(f"Service '{name}': invalid healthcheck.retries: '{retries}'")
+        probe["failureThreshold"] = int(text)
+    if check.get("start_period") is not None:
+        probe["initialDelaySeconds"] = parse_duration(
+            check["start_period"], "healthcheck.start_period", name
+        )
+    return probe
+
+
+def _mount_name(target: str) -> str:
+    cleaned = _INVALID_NAME_CHARS.sub("-", target.lower()).strip("-")
+    return (cleaned or "data")[:_DNS_LABEL_MAX].rstrip("-")
+
+
+def convert_volumes(
+    name: str, config: dict[str, Any], declared: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
+    """Compose `volumes` of one service -> (pod volumes, volumeMounts, PVC names, notes).
+
+    Named volumes become PersistentVolumeClaims (one per volume name, shared across
+    services). Anonymous volumes and tmpfs become emptyDir. Bind mounts have no Kubernetes
+    equivalent and are reported as notes.
+    """
+    entries = _expect_list(config.get("volumes"), "volumes", name)
+    volumes: list[dict[str, Any]] = []
+    mounts: list[dict[str, Any]] = []
+    claims: list[str] = []
+    notes: list[str] = []
+    used: set[str] = set()
+
+    def add(volume: dict[str, Any], target: str, read_only: bool) -> None:
+        # The same volume mounted at two paths is one pod volume with two mounts.
+        if volume["name"] not in used:
+            used.add(volume["name"])
+            volumes.append(volume)
+        mount: dict[str, Any] = {"name": volume["name"], "mountPath": target}
+        if read_only:
+            mount["readOnly"] = True
+        mounts.append(mount)
+
+    for entry in entries:
+        if isinstance(entry, dict):
+            kind = str(entry.get("type", "volume"))
+            source = entry.get("source")
+            target = entry.get("target")
+            read_only = _is_true(entry.get("read_only", False))
+            if not target:
+                raise ComposeError(f"Service '{name}': volume entry {entry!r} is missing 'target'")
+            target = str(target)
+        else:
+            parts = str(entry).split(":")
+            if len(parts) == 1:
+                kind, source, target, read_only = "volume", None, parts[0], False
+            elif len(parts) in (2, 3):
+                source, target = parts[0], parts[1]
+                read_only = len(parts) == 3 and "ro" in parts[2].split(",")
+                kind = "bind" if source.startswith(_BIND_PREFIXES) else "volume"
+            else:
+                raise ComposeError(f"Service '{name}': invalid volume entry '{entry}'")
+        if not target.startswith("/"):
+            raise ComposeError(
+                f"Service '{name}': volume target must be an absolute path: '{target}'"
+            )
+
+        if kind == "bind":
+            notes.append(
+                f"'{name}' bind mount '{source}:{target}' was not converted: Kubernetes has no "
+                "host paths; use a ConfigMap, bake it into the image, or a PersistentVolumeClaim"
+            )
+        elif kind == "tmpfs":
+            add({"name": _mount_name(target), "emptyDir": {"medium": "Memory"}}, target, False)
+        elif kind == "volume" and not source:
+            add({"name": _mount_name(target), "emptyDir": {}}, target, read_only)
+        elif kind == "volume":
+            claim = to_k8s_name(str(source))
+            spec = declared.get(str(source)) if isinstance(declared, dict) else None
+            spec = spec if isinstance(spec, dict) else {}
+            if _is_true(spec.get("external", False)):
+                claim = to_k8s_name(str(spec.get("name") or source))
+                notes.append(
+                    f"'{name}' mounts external volume '{source}': a PersistentVolumeClaim named "
+                    f"'{claim}' must already exist"
+                )
+            else:
+                claims.append(claim)
+            add({"name": claim, "persistentVolumeClaim": {"claimName": claim}}, target, read_only)
+        else:
+            notes.append(f"'{name}' volume type '{kind}' is not supported and was skipped")
+    return volumes, mounts, claims, notes
+
+
+def convert_depends_on(
+    name: str, config: dict[str, Any], services: dict[str, Any], include_service: bool
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Compose `depends_on` -> init containers that wait for each dependency's first port.
+
+    Kubernetes starts pods in any order; an init container that blocks until the dependency
+    answers on its Service port gives the same effect. Dependencies without ports (or when
+    Services are not generated) cannot be waited on and are reported as notes.
+    """
+    depends = config.get("depends_on")
+    if not depends:
+        return [], []
+    if isinstance(depends, dict):
+        names = [str(d) for d in depends]
+    elif isinstance(depends, list):
+        names = [str(d) for d in depends]
+    else:
+        raise ComposeError(f"Service '{name}': 'depends_on' must be a list or a mapping")
+
+    inits: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for dep in names:
+        if dep not in services:
+            raise ComposeError(f"Service '{name}' depends on unknown service '{dep}'")
+        dep_name = to_k8s_name(dep)
+        ports = _service_ports(dep, services[dep] or {}) if include_service else []
+        if not ports:
+            why = "has no ports" if include_service else "has no Service (Services were disabled)"
+            notes.append(
+                f"'{name}' depends on '{dep}', which {why}: nothing to wait for, so no init "
+                "container was added; make '{name}' retry its connection"
+            )
+            continue
+        port = ports[0]["service_port"]
+        inits.append(
+            {
+                "name": f"wait-for-{dep_name}"[:_DNS_LABEL_MAX].rstrip("-"),
+                "image": WAIT_IMAGE,
+                "command": ["sh", "-c", f"until nc -z {dep_name} {port}; do sleep 2; done"],
+            }
+        )
+    return inits, notes
+
+
+def _resources(name: str, config: dict[str, Any]) -> tuple[dict[str, dict[str, str]], str | None]:
+    """Container resources from deploy.resources, filled in when the compose file has none."""
+    deploy = _expect_mapping(config.get("deploy"), "deploy", name)
+    resources_config = _expect_mapping(deploy.get("resources"), "deploy.resources", name)
+    limits = _convert_resource_block(
+        resources_config.get("limits"), "deploy.resources.limits", name
+    )
+    requests = _convert_resource_block(
+        resources_config.get("reservations"), "deploy.resources.reservations", name
+    )
+    if limits:
+        resources: dict[str, dict[str, str]] = {"limits": limits}
+        if requests:
+            resources["requests"] = requests
+        return resources, None
+    if requests:
+        return {"requests": requests, "limits": dict(requests)}, (
+            f"'{name}' had reservations but no limits: limits set equal to the reservations"
+        )
+    return {"requests": dict(DEFAULT_REQUESTS), "limits": dict(DEFAULT_LIMITS)}, (
+        f"'{name}' had no resource limits: placeholder requests "
+        f"({DEFAULT_REQUESTS['cpu']}, {DEFAULT_REQUESTS['memory']}) and limits "
+        f"({DEFAULT_LIMITS['cpu']}, {DEFAULT_LIMITS['memory']}) were added; adjust them"
+    )
+
+
 def convert_service_to_deployment(
-    name: str, config: dict[str, Any] | None, namespace: str = "default"
+    name: str,
+    config: dict[str, Any] | None,
+    namespace: str = "default",
+    services: dict[str, Any] | None = None,
+    declared_volumes: dict[str, Any] | None = None,
+    include_service: bool = True,
 ) -> dict[str, Any]:
-    """Build a K8s apps/v1 Deployment for one compose service."""
+    """Build a K8s apps/v1 Deployment for one compose service.
+
+    Also returns, under the private key "_extra", the PVC names it needs and the notes it
+    produced; convert_compose_to_k8s() collects those and strips the key.
+    """
     config = config or {}
     k8s_name = to_k8s_name(name)
     labels = {"app": k8s_name}
+    notes: list[str] = []
 
     image = config.get("image")
     if not image:
@@ -462,22 +721,32 @@ def convert_service_to_deployment(
     if env:
         container["env"] = env
 
-    deploy = _expect_mapping(config.get("deploy"), "deploy", name)
-    resources_config = _expect_mapping(deploy.get("resources"), "deploy.resources", name)
-    resources: dict[str, dict[str, str]] = {}
-    limits = _convert_resource_block(
-        resources_config.get("limits"), "deploy.resources.limits", name
-    )
-    requests = _convert_resource_block(
-        resources_config.get("reservations"), "deploy.resources.reservations", name
-    )
-    if limits:
-        resources["limits"] = limits
-    if requests:
-        resources["requests"] = requests
-    if resources:
-        container["resources"] = resources
+    resources, resources_note = _resources(name, config)
+    container["resources"] = resources
+    if resources_note:
+        notes.append(resources_note)
 
+    probe = convert_healthcheck(name, config)
+    if probe is not None:
+        container["livenessProbe"] = probe
+        # A deep copy, or PyYAML would emit the shared `exec` dict as an anchor and alias.
+        container["readinessProbe"] = copy.deepcopy(probe)
+
+    volumes, mounts, claims, volume_notes = convert_volumes(name, config, declared_volumes or {})
+    notes.extend(volume_notes)
+    if mounts:
+        container["volumeMounts"] = mounts
+
+    pod: dict[str, Any] = {}
+    inits, depends_notes = convert_depends_on(name, config, services or {}, include_service)
+    notes.extend(depends_notes)
+    if inits:
+        pod["initContainers"] = inits
+    pod["containers"] = [container]
+    if volumes:
+        pod["volumes"] = volumes
+
+    deploy = _expect_mapping(config.get("deploy"), "deploy", name)
     replicas = deploy.get("replicas")
     replicas = 1 if replicas is None else _parse_replicas(replicas, name)
 
@@ -488,12 +757,25 @@ def convert_service_to_deployment(
         "spec": {
             "replicas": replicas,
             "selector": {"matchLabels": dict(labels)},
-            "template": {
-                "metadata": {"labels": dict(labels)},
-                "spec": {"containers": [container]},
-            },
+            "template": {"metadata": {"labels": dict(labels)}, "spec": pod},
         },
+        "_extra": {"claims": claims, "notes": notes},
     }
+
+
+def persistent_volume_claim(
+    name: str, namespace: str, size: str = DEFAULT_VOLUME_SIZE
+) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": size}}},
+    }
+
+
+def namespace_manifest(namespace: str) -> dict[str, Any]:
+    return {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}}
 
 
 def convert_service_to_k8s_service(
@@ -537,6 +819,7 @@ def convert_service_to_k8s_service(
 
 
 def _service_notes(name: str, config: dict[str, Any]) -> list[str]:
+    """Things the conversion could not do for the user and that need a decision."""
     notes: list[str] = []
     k8s_name = to_k8s_name(name)
     if k8s_name != name:
@@ -546,20 +829,11 @@ def _service_notes(name: str, config: dict[str, Any]) -> list[str]:
             f"'{name}' uses 'build': image set to '{k8s_name}:latest'; "
             "build and push it to a registry your cluster can pull from"
         )
-    if config.get("volumes"):
-        notes.append(f"'{name}' uses volumes: consider a PersistentVolumeClaim or ConfigMap")
-    if config.get("depends_on"):
-        notes.append(
-            f"'{name}' uses depends_on: K8s does not order startup; "
-            "consider initContainers or readiness probes"
-        )
     if config.get("networks"):
         notes.append(
-            f"'{name}' uses networks: K8s uses service DNS "
-            "(reach other services by name, e.g. http://db:5432)"
+            f"'{name}' uses networks: not needed in Kubernetes, services reach each other "
+            "by name (e.g. http://db:5432)"
         )
-    if config.get("healthcheck"):
-        notes.append(f"'{name}' has a healthcheck: convert it to liveness/readiness probes")
     if config.get("env_file"):
         notes.append(f"'{name}' uses env_file: move those values into a ConfigMap or Secret")
     for var_name, value in _environment_pairs(config.get("environment")):
@@ -576,21 +850,30 @@ def convert_compose_to_k8s(
 ) -> dict[str, Any]:
     """Convert a parsed compose file into K8s manifests.
 
+    Output is proportional to the input: a Namespace only when it isn't `default`, a
+    PersistentVolumeClaim per named volume, a Deployment per service, and a Service per
+    service with ports.
+
     Returns:
-        {"manifests": {"deployments": [...], "services": [...]}, "notes": [...]}
+        {"manifests": {"namespaces": [...], "persistent_volume_claims": [...],
+                       "deployments": [...], "services": [...]},
+         "notes": [...]}
     """
     services = compose_dict.get("services") if isinstance(compose_dict, dict) else None
     if not services or not isinstance(services, dict):
         raise ComposeError("Invalid compose file: no 'services' defined")
+    declared_volumes = compose_dict.get("volumes") or {}
+    if not isinstance(declared_volumes, dict):
+        raise ComposeError("Invalid compose file: top-level 'volumes' must be a mapping")
+    services = {str(name): (config or {}) for name, config in services.items()}
 
     deployments: list[dict[str, Any]] = []
     k8s_services: list[dict[str, Any]] = []
     notes: list[str] = []
     used_names: dict[str, str] = {}
+    claim_users: dict[str, list[str]] = {}
 
     for name, config in services.items():
-        name = str(name)
-        config = config or {}
         k8s_name = to_k8s_name(name)
         if k8s_name in used_names:
             raise ComposeError(
@@ -598,22 +881,53 @@ def convert_compose_to_k8s(
             )
         used_names[k8s_name] = name
 
-        deployment = convert_service_to_deployment(name, config, namespace)
+        deployment = convert_service_to_deployment(
+            name, config, namespace, services, declared_volumes, include_service
+        )
+        extra = deployment.pop("_extra")
         deployments.append(deployment)
+        for claim in extra["claims"]:
+            claim_users.setdefault(claim, [])
+            if name not in claim_users[claim]:
+                claim_users[claim].append(name)
         if include_service:
             service = convert_service_to_k8s_service(name, config, namespace)
             if service is not None:
                 k8s_services.append(service)
         notes.extend(_service_notes(name, config))
-        # Check what was generated, not the compose input: `limits: {pids: 5}` yields none.
-        container = deployment["spec"]["template"]["spec"]["containers"][0]
-        if "limits" not in container.get("resources", {}):
-            notes.append(f"'{name}' has no resource limits")
+        notes.extend(extra["notes"])
 
-    return {"manifests": {"deployments": deployments, "services": k8s_services}, "notes": notes}
+    claims = [persistent_volume_claim(claim, namespace) for claim in claim_users]
+    for claim, users in claim_users.items():
+        shared = f", shared by {', '.join(repr(u) for u in users)}" if len(users) > 1 else ""
+        notes.append(
+            f"volume '{claim}' became a PersistentVolumeClaim of {DEFAULT_VOLUME_SIZE} "
+            f"(placeholder size, ReadWriteOnce{shared}); adjust it before applying"
+        )
+        if len(users) > 1:
+            notes.append(
+                f"'{claim}' is mounted by more than one service: with ReadWriteOnce they must run "
+                "on the same node; use ReadWriteMany storage if they can't"
+            )
+
+    namespaces = [] if namespace == "default" else [namespace_manifest(namespace)]
+    return {
+        "manifests": {
+            "namespaces": namespaces,
+            "persistent_volume_claims": claims,
+            "deployments": deployments,
+            "services": k8s_services,
+        },
+        "notes": notes,
+    }
 
 
 def manifests_to_yaml(manifests: dict[str, list[dict[str, Any]]]) -> str:
-    """Render manifests as a multi-document YAML string (Deployments first, then Services)."""
-    documents = manifests.get("deployments", []) + manifests.get("services", [])
+    """Render manifests as one multi-document YAML string, in apply order: Namespace,
+    PersistentVolumeClaims, Deployments, Services."""
+    documents = [
+        doc
+        for kind in ("namespaces", "persistent_volume_claims", "deployments", "services")
+        for doc in manifests.get(kind, [])
+    ]
     return yaml.safe_dump_all(documents, sort_keys=False, default_flow_style=False)

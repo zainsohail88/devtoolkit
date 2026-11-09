@@ -1,3 +1,6 @@
 {% if error %}
-<div role="alert" class="alert alert-error mt-4">{{ error }}</div>
+<div role="alert" class="alert alert-error" data-error{% if error_line %} data-error-line="{{ error_line }}" data-error-column="{{ error_column or 1 }}"{% endif %}>
+  {% include "icons/info.svg" %}
+  <span>{{ error }}{% if error_line %} <span class="font-mono text-small">(line {{ error_line }}, column {{ error_column or 1 }})</span>{% endif %}</span>
+</div>
 {% endif %}

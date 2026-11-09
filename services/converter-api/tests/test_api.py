@@ -38,7 +38,7 @@ def test_convert_json():
     assert body["success"] is True
     assert body["manifests"]["deployments"][0]["metadata"]["name"] == "web"
     assert body["manifests"]["services"][0]["spec"]["ports"][0]["port"] == 80
-    assert "'web' has no resource limits" in body["notes"]
+    assert any(n.startswith("'web' had no resource limits: placeholder") for n in body["notes"])
 
 
 def test_convert_yaml():
@@ -168,3 +168,64 @@ def test_convert_rejects_python_tags():
     )
     assert response.status_code == 400
     assert response.json()["error"].startswith("Invalid YAML")
+
+
+def test_convert_files_manifests():
+    response = client.post(
+        "/convert/compose-to-k8s/files",
+        json={
+            "compose_yaml": "services:\n  web:\n    image: nginx\n    ports: ['80']",
+            "namespace": "shop",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True and body["output"] == "manifests"
+    assert [f["path"] for f in body["files"]] == [
+        "shop-namespace.yaml",
+        "web-deployment.yaml",
+        "web-service.yaml",
+    ]
+    assert body["files"][1]["content"].startswith("apiVersion: apps/v1\nkind: Deployment")
+    assert any("placeholder" in n for n in body["notes"])
+
+
+def test_convert_files_helm():
+    response = client.post(
+        "/convert/compose-to-k8s/files",
+        json={"compose_yaml": "name: demo\nservices:\n  web:\n    image: nginx", "output": "helm"},
+    )
+    assert response.status_code == 200
+    paths = [f["path"] for f in response.json()["files"]]
+    assert paths == ["Chart.yaml", "values.yaml", "templates/web-deployment.yaml"]
+    assert "name: demo" in response.json()["files"][0]["content"]
+
+
+def test_convert_files_rejects_unknown_output_and_bad_compose():
+    response = client.post(
+        "/convert/compose-to-k8s/files",
+        json={"compose_yaml": "services: {}", "output": "kustomize"},
+    )
+    assert response.status_code == 422
+    response = client.post("/convert/compose-to-k8s/files", json={"compose_yaml": "version: '3'"})
+    assert response.status_code == 400
+    assert response.json() == {
+        "success": False,
+        "error": "Invalid compose file: no 'services' defined",
+    }
+
+
+def test_convert_error_carries_line_and_column_for_yaml_syntax_errors():
+    response = client.post(
+        "/convert/compose-to-k8s/files",
+        json={"compose_yaml": "services:\n  web:\n   image: x\n  ports: [80"},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"].startswith("Invalid YAML")
+    assert body["line"] >= 1 and body["column"] >= 1
+    # Other errors have no position.
+    response = client.post("/convert/compose-to-k8s/files", json={"compose_yaml": "services: {}"})
+    assert response.status_code == 400
+    assert "line" not in response.json()

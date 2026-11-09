@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from fastapi import FastAPI
@@ -19,6 +19,7 @@ from converters.compose_to_k8s import (
     manifests_to_yaml,
     parse_compose,
 )
+from converters.render import chart_name_from, render_files
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
@@ -65,12 +66,22 @@ class ConvertRequest(BaseModel):
     include_service: bool = True
 
 
+class ConvertFilesRequest(ConvertRequest):
+    output: Literal["manifests", "helm"] = Field(
+        "manifests", description="'manifests': one YAML file per resource. 'helm': a Helm chart."
+    )
+
+
 class ValidateRequest(BaseModel):
     yaml: str = Field(..., max_length=MAX_INPUT_CHARS)
 
 
-def _error(message: str, status_code: int = 400) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content={"success": False, "error": message})
+def _error(exc: ComposeError, status_code: int = 400) -> JSONResponse:
+    content: dict[str, Any] = {"success": False, "error": exc.message}
+    if exc.line is not None:
+        content["line"] = exc.line
+        content["column"] = exc.column
+    return JSONResponse(status_code=status_code, content=content)
 
 
 def _convert(request: ConvertRequest) -> dict[str, Any]:
@@ -97,7 +108,7 @@ def convert_compose(request: ConvertRequest) -> dict[str, Any] | JSONResponse:
         result = _convert(request)
     except ComposeError as exc:
         logger.info("conversion rejected: %s", exc)
-        return _error(exc.message)
+        return _error(exc)
     return {"success": True, "manifests": result["manifests"], "notes": result["notes"]}
 
 
@@ -108,12 +119,26 @@ def convert_compose_yaml(request: ConvertRequest) -> dict[str, Any] | JSONRespon
         result = _convert(request)
     except ComposeError as exc:
         logger.info("conversion rejected: %s", exc)
-        return _error(exc.message)
+        return _error(exc)
     return {
         "success": True,
         "yaml": manifests_to_yaml(result["manifests"]),
         "notes": result["notes"],
     }
+
+
+@app.post("/convert/compose-to-k8s/files", response_model=None)
+def convert_compose_files(request: ConvertFilesRequest) -> dict[str, Any] | JSONResponse:
+    """Convert docker-compose YAML and return the result as files: plain manifests (one per
+    resource, in apply order) or a Helm chart."""
+    try:
+        compose = parse_compose(request.compose_yaml)
+        result = convert_compose_to_k8s(compose, request.namespace, request.include_service)
+        files = render_files(result, request.output, chart_name_from(compose))
+    except ComposeError as exc:
+        logger.info("conversion rejected: %s", exc)
+        return _error(exc)
+    return {"success": True, "output": request.output, "files": files, "notes": result["notes"]}
 
 
 @app.post("/validate/yaml")

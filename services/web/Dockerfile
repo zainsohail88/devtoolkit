@@ -34,9 +34,19 @@ RUN case "$TARGETARCH" in \
 WORKDIR /src
 COPY styles/ styles/
 COPY templates/ templates/
+COPY static/app.js static/app.js
 RUN tailwindcss -i styles/input.css -o /out/app.css --minify
 
-# --- Stage 3: small runtime image, no build tools, non-root user ----------------
+# --- Stage 3: bundle the code editor (CodeMirror 6) with esbuild --------------------
+FROM node:22-alpine AS editor
+
+WORKDIR /src
+COPY editor/package.json editor/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY editor/src/ src/
+RUN npx esbuild src/editor.js --bundle --minify --format=iife --target=es2020 --outfile=/out/editor.js
+
+# --- Stage 4: small runtime image, no build tools, non-root user ----------------
 FROM python:3.15-slim AS runtime
 
 ENV PATH="/opt/venv/bin:$PATH" \
@@ -55,6 +65,7 @@ COPY --chown=app:app main.py api_client.py ./
 COPY --chown=app:app templates/ templates/
 COPY --chown=app:app static/ static/
 COPY --from=css --chown=app:app /out/app.css static/app.css
+COPY --from=editor --chown=app:app /out/editor.js static/vendor/editor.js
 
 USER 10001:10001
 EXPOSE 8080

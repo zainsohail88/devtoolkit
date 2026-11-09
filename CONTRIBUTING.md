@@ -47,10 +47,12 @@ The design system is one file: `services/web/styles/input.css`. Every colour, si
 - **One component per concept.** A variant is a modifier class (`btn-primary`), not a new component.
 - **Both themes.** New colours get a light and a dark value, checked for contrast: 4.5:1 for text, 3:1 for interface borders. The two dark blocks in `input.css` must stay identical.
 - **Keyboard and motion.** Anything clickable is at least 44px tall (`min-h-11`), focus stays visible, and animation respects `prefers-reduced-motion` (already handled globally).
-- **Scripts.** `app.js` is the only JavaScript, and every page must work without it. The one inline script (theme before first paint) is allowed by hash in the Content-Security-Policy; don't add others.
-- **Copy.** Lead with the result, no filler, no em dashes, and prefer the smaller true claim.
+- **Scripts.** `app.js` and the editor bundle are the only JavaScript, and every page must work without them: forms post and the server renders the result. The one inline script (theme before first paint) is allowed by hash in the Content-Security-Policy; don't add others.
+- **Icons.** Inline SVGs from `templates/icons/` (`{% include "icons/copy.svg" %}`), sized by the `.icon` class. Add icons from the pinned Lucide release named in the docs, strip `width`/`height`, and add `aria-hidden="true"`.
+- **Editors.** YAML goes through the CodeMirror editor (`services/web/editor/`), which reads its colours from the tokens. A new tool page needs only a `[data-editor]` container around its textarea and a result fragment; `app.js` does the rest.
+- **Copy.** Lead with the result, no filler, no em dashes, and prefer the smaller true claim. The product is called DevToolkit; pages name what the tool does, not what to paste.
 
-`make css` rebuilds `static/app.css`; the Dockerfile does the same during the image build.
+`make css` rebuilds `static/app.css` and `make editor` rebuilds `static/vendor/editor.js` (Node.js 22); the Dockerfile does both during the image build.
 
 ## Kubernetes manifest rules
 

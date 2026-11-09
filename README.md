@@ -20,6 +20,7 @@ It is two services: **web**, the pages you use in a browser, and **converter-api
 | [Python](https://www.python.org/) | 3.13 | Dev Mode |
 | [GNU Make](https://www.gnu.org/software/make/) | 3.81 | Dev Mode, Kubernetes Mode |
 | [curl](https://curl.se/) | Any current release | Dev Mode (downloads the Tailwind CLI once, for the web UI's stylesheet) |
+| [Node.js](https://nodejs.org/) | 22 | Dev Mode (bundles the web UI's code editor once, `make editor`) |
 | [Docker](https://docs.docker.com/get-docker/) | Any current release | Kubernetes Mode (builds the images; kind runs on it) |
 | [kind](https://kind.sigs.k8s.io/) | v0.33.0 (pinned in [`.tool-versions`](.tool-versions)) | Kubernetes Mode |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.36 (cluster runs Kubernetes 1.37) | Kubernetes Mode |

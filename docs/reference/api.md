@@ -12,6 +12,7 @@ The `web` service calls these endpoints from the server side. In the cluster, a 
 | GET | `/ready` | Readiness probe: `{"status": "ready"}` |
 | POST | `/convert/compose-to-k8s` | Convert compose YAML, return manifests as JSON |
 | POST | `/convert/compose-to-k8s/yaml` | Same, return one multi-document YAML string |
+| POST | `/convert/compose-to-k8s/files` | Same, return files: one per resource, or a Helm chart |
 | POST | `/validate/yaml` | Check YAML syntax, report line/column of errors |
 
 ## Convert
@@ -42,7 +43,25 @@ Both convert endpoints take the same request:
 }
 ```
 
-`/convert/compose-to-k8s/yaml` returns `"yaml": "apiVersion: apps/v1\n..."` in place of `manifests`: all Deployments, then all Services, separated by `---`.
+`manifests` has four lists, each possibly empty: `namespaces`, `persistent_volume_claims`, `deployments`, `services`.
+
+`/convert/compose-to-k8s/yaml` returns `"yaml": "apiVersion: v1\n..."` in place of `manifests`: every resource in apply order (Namespace, PersistentVolumeClaims, Deployments, Services), separated by `---`.
+
+`/convert/compose-to-k8s/files` takes one more field, `output`: `manifests` (default) or `helm`, and returns the result as files:
+
+```json
+{
+  "success": true,
+  "output": "manifests",
+  "files": [
+    {"path": "web-deployment.yaml", "content": "apiVersion: apps/v1\n..."},
+    {"path": "web-service.yaml", "content": "apiVersion: v1\n..."}
+  ],
+  "notes": []
+}
+```
+
+With `output: helm` the files are `Chart.yaml`, `values.yaml` and `templates/*.yaml`. An unknown `output` is a 422.
 
 `notes` lists anything that needs a human decision. See [conversion rules](conversion-rules.md).
 
