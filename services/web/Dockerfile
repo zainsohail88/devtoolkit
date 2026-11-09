@@ -38,7 +38,7 @@ COPY static/app.js static/app.js
 RUN tailwindcss -i styles/input.css -o /out/app.css --minify
 
 # --- Stage 3: bundle the code editor (CodeMirror 6) with esbuild --------------------
-FROM node:22-alpine AS editor
+FROM node:26-alpine AS editor
 
 WORKDIR /src
 COPY editor/package.json editor/package-lock.json ./
