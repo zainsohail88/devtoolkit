@@ -1,0 +1,371 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Lambda, EC2 and ECS resources converted by hand-written aws mappings.
+Parameters:
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0123456789abcdef0
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: sg-0123456789abcdef0
+  RoleArn:
+    Type: String
+    Default: arn:aws:iam::123456789012:role/app
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-0123456789abcdef0
+  UseVpc:
+    Type: String
+    Default: "false"
+Conditions:
+  InVpc: !Equals [!Ref UseVpc, "true"]
+Resources:
+  Handler:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: orders-handler
+      Description: Handles orders
+      Runtime: python3.12
+      Handler: app.handler
+      Role: !Ref RoleArn
+      MemorySize: "256"
+      Timeout: 30
+      ReservedConcurrentExecutions: 5
+      Architectures: [arm64]
+      Layers: [!Ref Layer]
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {"ok": True}
+      Environment:
+        Variables:
+          TABLE_NAME: orders
+          STAGE: !Ref AWS::Region
+      VpcConfig: !If
+        - InVpc
+        - SubnetIds: [!Ref SubnetId]
+          SecurityGroupIds: [!Ref SecurityGroupId]
+        - !Ref AWS::NoValue
+      TracingConfig:
+        Mode: Active
+      DeadLetterConfig:
+        TargetArn: arn:aws:sqs:us-east-1:123456789012:dlq
+      EphemeralStorage:
+        Size: 1024
+      LoggingConfig:
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+        LogFormat: JSON
+      Tags:
+        - Key: team
+          Value: orders
+  NodeHandler:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !Ref RoleArn
+      Code:
+        S3Bucket: my-artifacts
+        S3Key: node/handler.zip
+        S3ObjectVersion: "3"
+      LoggingConfig:
+        LogGroup: /custom/node
+      SnapStart:
+        ApplyOn: None
+  ImageHandler:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: image-handler
+      Role: !Ref RoleArn
+      Code:
+        ImageUri: 123456789012.dkr.ecr.us-east-1.amazonaws.com/app:1.0
+      ImageConfig:
+        Command: [app.handler]
+        EntryPoint: [/lambda-entrypoint.sh]
+        WorkingDirectory: /var/task
+  Layer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: shared-libs
+      Description: Shared libraries
+      LicenseInfo: MIT
+      CompatibleRuntimes: [python3.12]
+      CompatibleArchitectures: [arm64]
+      Content:
+        S3Bucket: my-artifacts
+        S3Key: layers/shared.zip
+  Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref Handler
+      Principal: s3.amazonaws.com
+      SourceArn: arn:aws:s3:::uploads
+      SourceAccount: !Ref AWS::AccountId
+  Queue:
+    Type: AWS::SQS::Queue
+  Mapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !GetAtt Handler.Arn
+      EventSourceArn: !GetAtt Queue.Arn
+      BatchSize: 10
+      Enabled: true
+      MaximumBatchingWindowInSeconds: 5
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"body": {"type": ["order"]}}'
+      ScalingConfig:
+        MaximumConcurrency: 4
+  StreamMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref NodeHandler
+      EventSourceArn: arn:aws:kinesis:us-east-1:123456789012:stream/events
+      StartingPosition: AT_TIMESTAMP
+      StartingPositionTimestamp: 1700000000
+      BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: 2
+      MaximumRecordAgeInSeconds: 3600
+      ParallelizationFactor: 2
+      TumblingWindowInSeconds: 60
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt Queue.Arn
+  Url:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt Handler.Arn
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowCredentials: true
+        AllowOrigins: ["https://example.com"]
+        AllowMethods: [GET]
+        AllowHeaders: [content-type]
+        ExposeHeaders: [x-request-id]
+        MaxAge: 300
+  Version:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref Handler
+      Description: v1
+  Alias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      Name: live
+      Description: Live traffic
+      FunctionName: !Ref Handler
+      FunctionVersion: !GetAtt Version.Version
+      RoutingConfig:
+        AdditionalVersionWeights:
+          - FunctionVersion: "1"
+            FunctionWeight: 0.1
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 2
+  Server:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: t3.micro
+      KeyName: ops
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref SecurityGroupId]
+      IamInstanceProfile: app-profile
+      Monitoring: true
+      EbsOptimized: "true"
+      CreditSpecification:
+        CPUCredits: standard
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          echo "region ${AWS::Region}" > /etc/motd
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+        - DeviceName: /dev/sdf
+          Ebs:
+            VolumeSize: 100
+            VolumeType: gp3
+        - DeviceName: /dev/sdb
+          VirtualName: ephemeral0
+      Tags:
+        - Key: Name
+          Value: app-server
+  Bastion:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: t3.nano
+      UserData: IyEvYmluL2Jhc2gK
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref SecurityGroupId]
+          DeleteOnTermination: true
+  Template:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: app-template
+      VersionDescription: Initial
+      TagSpecifications:
+        - ResourceType: launch-template
+          Tags:
+            - Key: team
+              Value: platform
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: t3.small
+        KeyName: ops
+        SecurityGroupIds: [!Ref SecurityGroupId]
+        UserData: !Base64 "#!/bin/bash\necho hello"
+        IamInstanceProfile:
+          Name: app-profile
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        Monitoring:
+          Enabled: true
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp3
+              Encrypted: true
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: false
+            SubnetId: !Ref SubnetId
+            Groups: [!Ref SecurityGroupId]
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: from-template
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: apps
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      CapacityProviders: [FARGATE, FARGATE_SPOT]
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+          Base: 1
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: OVERRIDE
+          LogConfiguration:
+            CloudWatchLogGroupName: /ecs/exec
+            CloudWatchEncryptionEnabled: true
+      Tags:
+        - Key: team
+          Value: platform
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: web
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !Ref RoleArn
+      TaskRoleArn: !Ref RoleArn
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      EphemeralStorage:
+        SizeInGiB: 30
+      ContainerDefinitions:
+        - Name: web
+          Image: nginx:1.27
+          Essential: "true"
+          Cpu: "128"
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+          Environment:
+            - Name: REGION
+              Value: !Ref AWS::Region
+          DockerLabels:
+            com.example.Team: platform
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/web
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: web
+          MountPoints:
+            - SourceVolume: data
+              ContainerPath: /data
+              ReadOnly: false
+          HealthCheck:
+            Command: [CMD-SHELL, "curl -f http://localhost/ || exit 1"]
+            Interval: 30
+            Retries: 3
+      Volumes:
+        - Name: data
+          EFSVolumeConfiguration:
+            FilesystemId: fs-12345678
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              IAM: ENABLED
+        - Name: scratch
+      Tags:
+        - Key: app
+          Value: web
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: web
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      EnableExecuteCommand: true
+      PropagateTags: SERVICE
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: [!Ref SubnetId]
+          SecurityGroups: [!Ref SecurityGroupId]
+      LoadBalancers:
+        - ContainerName: web
+          ContainerPort: 80
+          TargetGroupArn: arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/web/abc
+      DeploymentController:
+        Type: ECS
+      Tags:
+        - Key: app
+          Value: web
+Outputs:
+  HandlerArn:
+    Value: !GetAtt Handler.Arn
+  HandlerName:
+    Value: !Ref Handler
+  FunctionUrl:
+    Value: !GetAtt Url.FunctionUrl
+  Version:
+    Value: !GetAtt Version.Version
+  ServerIp:
+    Value: !GetAtt Server.PublicIp
+  TemplateVersion:
+    Value: !GetAtt Template.LatestVersionNumber
+  ServiceName:
+    Value: !GetAtt Service.Name

@@ -20,6 +20,7 @@ Every job covers both services. The list of services is one line at the top of `
 | `test` | pytest on each service; fails if either is under **95%** coverage |
 | `build` | Builds both Docker images, starts them on one Docker network, and runs a conversion through the web UI, so `web` → `converter-api` is proven to work |
 | `validate-k8s` | [kubeconform](https://github.com/yannh/kubeconform) `-strict` on `k8s/` (the maintained successor to kubeval) |
+| `validate-terraform` | Converts every template in `services/converter-api/tests/fixtures/cfn/` to Terraform, with the `aws` and with the `awscc` provider, and runs `terraform fmt -check` and `terraform validate` on each. Warnings fail it too. Terraform's version and SHA-256 are pinned in `ci.yaml` |
 | `e2e` | Creates a [kind](https://kind.sigs.k8s.io/) cluster from `scripts/kind-cluster.yaml` (the same one as `make cluster-up`), deploys `k8s/`, waits for both rollouts, then uses the UI through the `web` Service, including a conversion. Finally it checks the NetworkPolicy: a `web` pod can reach `converter-api`, and a pod without the `web` label cannot |
 
 PR runs that get superseded by a newer push are cancelled. Runs on `main` always finish, so every passing commit gets its images.
@@ -37,6 +38,7 @@ PR runs that get superseded by a newer push are cancelled. Runs on `main` always
 |------|-----|
 | Pinned actions | Every third-party action is pinned to a full commit SHA (with the version in a comment), so a moved or hijacked tag can't change what runs |
 | Pinned Tailwind CLI | The `web` Dockerfile downloads a fixed version and checks its SHA-256 before using it |
+| Pinned Terraform | CI downloads a fixed Terraform release and checks its SHA-256 before using it |
 | Locked editor bundle | The code editor's npm dependencies are pinned exactly in `services/web/editor/package-lock.json` and installed with `npm ci`; the bundle is built in the image, never committed |
 | Dependabot | Weekly update PRs for both services' Python packages and Docker base images, the editor's npm packages, and GitHub Actions. Minor and patch bumps are grouped; major bumps get their own PR. |
 | CodeQL | `security-extended` queries on Python and on the workflows, e.g. to catch script injection |

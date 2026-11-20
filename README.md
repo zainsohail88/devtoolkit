@@ -6,7 +6,7 @@ Practical DevOps conversion tools, built as microservices on Kubernetes.
 
 DevToolkit has two jobs:
 
-1. **Be useful.** Tools DevOps engineers reach for every day, starting with a Docker Compose to Kubernetes converter, usable from a web page or an API.
+1. **Be useful.** Converters DevOps engineers reach for, usable from a web page or an API: Docker Compose to Kubernetes, and CloudFormation (including AWS SAM and AWS CDK) to Terraform.
 2. **Be a clean example.** Raw Kubernetes manifests (no Helm yet), health probes, resource limits, non-root containers, a NetworkPolicy and a full CI/CD pipeline, all small enough to read in one sitting.
 
 It is two services: **web**, the pages you use in a browser, and **converter-api**, which does the conversions. Only web can reach the API.
@@ -25,6 +25,7 @@ It is two services: **web**, the pages you use in a browser, and **converter-api
 | [kind](https://kind.sigs.k8s.io/) | v0.33.0 (pinned in [`.tool-versions`](.tool-versions)) | Kubernetes Mode |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.36 (cluster runs Kubernetes 1.37) | Kubernetes Mode |
 | [jq](https://jqlang.org/) | 1.5 | Only the [example](#example) below |
+| [Terraform](https://developer.hashicorp.com/terraform/install) | 1.5 | Only `make validate-terraform`, which checks the CloudFormation converter's output |
 
 #### Dev Mode
 
@@ -82,12 +83,33 @@ kind: Service
     protocol: TCP
 ```
 
+A CloudFormation template works the same way, with `/convert/cfn-to-terraform`:
+
+```bash
+curl -s localhost:8000/convert/cfn-to-terraform \
+  -H 'Content-Type: application/json' \
+  -d '{"template": "Resources:\n  Logs:\n    Type: AWS::S3::Bucket\n    Properties:\n      VersioningConfiguration:\n        Status: Enabled"}' \
+  | jq -r '.files[] | select(.path == "main.tf") | .content'
+```
+
+```hcl
+resource "aws_s3_bucket" "logs" {}
+
+resource "aws_s3_bucket_versioning" "logs_versioning" {
+  bucket = aws_s3_bucket.logs.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+```
+
 ## Documentation
 
 | Topic | |
 |-------|-|
 | [API reference](docs/reference/api.md) | Endpoints, requests, responses, errors, input limits |
 | [Conversion rules](docs/reference/conversion-rules.md) | How each compose field maps to Kubernetes |
+| [CloudFormation to Terraform](docs/reference/cloudformation-to-terraform.md) | How CloudFormation, SAM and CDK templates become Terraform |
 | [Architecture](docs/architecture.md) | Project layout, the two services, how they run on Kubernetes |
 | [CI/CD](docs/operations/ci-cd.md) | Workflows, image publishing, security scanning |
 | [Deploying to your cluster](docs/operations/deploy.md) | Run it on any Kubernetes cluster |

@@ -50,12 +50,16 @@ def configure_logging(value: str | None) -> str:
 LOG_LEVEL = configure_logging(os.getenv("LOG_LEVEL"))
 
 BASE_DIR = Path(__file__).parent
-# Same limit as converter-api, checked here first so users get a clear message.
+# Same limits as converter-api, checked here first so users get a clear message.
 MAX_INPUT_CHARS = 100_000
-# Room for the form fields and multipart framing around a maximum-size input.
-MAX_BODY_BYTES = 4 * MAX_INPUT_CHARS + 16_384
+MAX_TEMPLATE_CHARS = 500_000
+# Room for the form fields and multipart framing around the largest input.
+MAX_BODY_BYTES = 4 * MAX_TEMPLATE_CHARS + 16_384
 NAMESPACE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+STACK_NAME_RE = re.compile(r"^[A-Za-z][-A-Za-z0-9]{0,127}$")
 OUTPUTS = ("manifests", "helm")
+PROVIDERS = ("aws", "awscc")
+LAYOUTS = ("files", "single")
 UNAVAILABLE = "The converter is unavailable right now. Please try again in a minute."
 
 # A realistic compose file for the "Load an example" button: two services, a health check,
@@ -100,6 +104,232 @@ services:
 volumes:
   dbdata: {}
 """
+
+# Examples for the CloudFormation page: one per kind of input, each small enough to read but
+# with something in it for every part of the conversion (references, conditions, notes).
+EXAMPLE_CLOUDFORMATION = """\
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Image uploads, resized by a function
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+  RetentionDays:
+    Type: Number
+    Default: 30
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+Resources:
+  Uploads:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-uploads-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: !If [IsProd, Enabled, Suspended]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+      Tags:
+        - Key: environment
+          Value: !Ref Environment
+  Jobs:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetters.Arn
+        maxReceiveCount: 5
+  DeadLetters:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+  ResizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: read-uploads
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${Uploads.Arn}/*"
+  Resizer:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt ResizerRole.Arn
+      MemorySize: !If [IsProd, 1024, 256]
+      Timeout: 60
+      Environment:
+        Variables:
+          BUCKET: !Ref Uploads
+          QUEUE_URL: !Ref Jobs
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {"resized": len(event.get("Records", []))}
+  JobsTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt Jobs.Arn
+      FunctionName: !Ref Resizer
+      BatchSize: 10
+  Alerts:
+    Type: AWS::SNS::Topic
+    Condition: IsProd
+Outputs:
+  BucketName:
+    Value: !Ref Uploads
+  QueueUrl:
+    Value: !Ref Jobs
+    Export:
+      Name: !Sub "${AWS::StackName}-queue-url"
+"""
+
+EXAMPLE_SAM = """\
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: A small orders API
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 10
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref Orders
+Resources:
+  Orders:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: orderId
+        Type: String
+  OrdersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/orders/
+      Handler: app.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Orders
+      Events:
+        ListOrders:
+          Type: Api
+          Properties:
+            Path: /orders
+            Method: get
+        GetOrder:
+          Type: Api
+          Properties:
+            Path: /orders/{id}
+            Method: get
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 3 * * ? *)
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/orders"
+"""
+
+EXAMPLE_CDK = """\
+{
+  "Resources": {
+    "NotesTable7B1C1A4B": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+        "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+        "BillingMode": "PAY_PER_REQUEST"
+      },
+      "UpdateReplacePolicy": "Retain",
+      "DeletionPolicy": "Retain",
+      "Metadata": {"aws:cdk:path": "NotesStack/NotesTable/Resource"}
+    },
+    "HandlerServiceRoleFCDC14AE": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [{
+            "Action": "sts:AssumeRole",
+            "Effect": "Allow",
+            "Principal": {"Service": "lambda.amazonaws.com"}
+          }],
+          "Version": "2012-10-17"
+        },
+        "ManagedPolicyArns": [{
+          "Fn::Join": ["", [
+            "arn:", {"Ref": "AWS::Partition"},
+            ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+          ]]
+        }]
+      },
+      "Metadata": {"aws:cdk:path": "NotesStack/Handler/ServiceRole/Resource"}
+    },
+    "Handler886CB40B": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": {"Fn::Sub": "cdk-hnb659fds-assets-${AWS::AccountId}-${AWS::Region}"},
+          "S3Key": "6c3d4a1f0e2b.zip"
+        },
+        "Handler": "index.handler",
+        "Role": {"Fn::GetAtt": ["HandlerServiceRoleFCDC14AE", "Arn"]},
+        "Runtime": "nodejs22.x",
+        "Environment": {"Variables": {"TABLE": {"Ref": "NotesTable7B1C1A4B"}}}
+      },
+      "DependsOn": ["HandlerServiceRoleFCDC14AE"],
+      "Metadata": {
+        "aws:cdk:path": "NotesStack/Handler/Resource",
+        "aws:asset:path": "asset.6c3d4a1f0e2b",
+        "aws:asset:property": "Code"
+      }
+    },
+    "CDKMetadata": {
+      "Type": "AWS::CDK::Metadata",
+      "Properties": {"Analytics": "v2:deflate64:H4sIAAAAAAAA"},
+      "Metadata": {"aws:cdk:path": "NotesStack/CDKMetadata/Default"}
+    }
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Type": "AWS::SSM::Parameter::Value<String>",
+      "Default": "/cdk-bootstrap/hnb659fds/version"
+    }
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [{
+        "Assert": {"Fn::Not": [{"Fn::Contains": [
+          ["1", "2", "3", "4", "5"], {"Ref": "BootstrapVersion"}
+        ]}]},
+        "AssertDescription": "CDK bootstrap stack version 6 required."
+      }]
+    }
+  }
+}
+"""
+
+EXAMPLES = {"cloudformation": EXAMPLE_CLOUDFORMATION, "sam": EXAMPLE_SAM, "cdk": EXAMPLE_CDK}
 
 # Applies a saved theme choice before first paint, so the page never flashes the wrong theme.
 # It must be inline (a deferred script is too late), so the CSP allows exactly this script by
@@ -153,19 +383,44 @@ class InputError(Exception):
     """The user's input can't be sent to converter-api. The message is shown on the page."""
 
 
-async def read_input(text: str, upload: UploadFile | None) -> str:
+async def read_input(
+    text: str,
+    upload: UploadFile | None,
+    limit: int = MAX_INPUT_CHARS,
+    empty: str = "Paste some YAML or choose a file to upload.",
+) -> str:
     """Return the uploaded file if one was chosen, otherwise the pasted text."""
     if upload is not None and upload.filename:
-        raw = await upload.read(MAX_INPUT_CHARS * 4 + 1)
+        raw = await upload.read(limit * 4 + 1)
         try:
             text = raw.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
             raise InputError("The uploaded file isn't UTF-8 text.") from exc
     if not text.strip():
-        raise InputError("Paste some YAML or choose a file to upload.")
-    if len(text) > MAX_INPUT_CHARS:
-        raise InputError(f"The input is longer than {MAX_INPUT_CHARS:,} characters.")
+        raise InputError(empty)
+    if len(text) > limit:
+        raise InputError(f"The input is longer than {limit:,} characters.")
     return text
+
+
+def notes_markdown(notes: list[str], source: str) -> str:
+    """The conversion notes as a file for the zip, so they travel with the code."""
+    lines = [
+        "# Conversion notes",
+        "",
+        f"Converted from {SOURCE_LABELS.get(source, source)} by DevToolkit. Everything not "
+        "listed here was converted; these need a decision.",
+        "",
+    ]
+    lines += [f"- {note}" for note in notes] or ["- Nothing: every resource was converted."]
+    return "\n".join(lines) + "\n"
+
+
+SOURCE_LABELS = {
+    "cloudformation": "CloudFormation",
+    "sam": "AWS SAM",
+    "cdk": "AWS CDK (synthesized)",
+}
 
 
 def wants_fragment(request: Request) -> bool:
@@ -370,6 +625,140 @@ def create_app(api: ApiClient | None = None) -> FastAPI:
             buffer,
             media_type="application/zip",
             headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
+
+    # --- CloudFormation -> Terraform -------------------------------------------------------
+
+    def cfn_context(
+        template: str, provider: str, layout: str, stack_name: str, include_imports: bool
+    ) -> dict[str, Any]:
+        return {
+            "template": template,
+            "provider": provider,
+            "layout": layout,
+            "stack_name": stack_name,
+            "include_imports": include_imports,
+            "source_labels": SOURCE_LABELS,
+        }
+
+    @app.get("/cfn-to-terraform", response_class=HTMLResponse)
+    def cfn_form(request: Request, example: str | None = None) -> Response:
+        if example:
+            text = EXAMPLES.get(example, EXAMPLE_CLOUDFORMATION)
+            if "text/plain" in request.headers.get("accept", ""):
+                return PlainTextResponse(text)
+            return page(
+                request,
+                "cfn_to_terraform.html",
+                cfn_context(text, "aws", "files", "", False),
+            )
+        return page(request, "cfn_to_terraform.html", cfn_context("", "aws", "files", "", False))
+
+    async def convert_cfn(
+        request: Request,
+        template: str,
+        template_file: UploadFile | None,
+        provider: str,
+        layout: str,
+        stack_name: str,
+        include_imports: bool,
+    ) -> tuple[dict[str, Any], int]:
+        """Run a CloudFormation conversion. Returns (template context, HTTP status)."""
+        stack_name = stack_name.strip()
+        context = cfn_context(template, provider, layout, stack_name, include_imports)
+        try:
+            context["template"] = await read_input(
+                template,
+                template_file,
+                MAX_TEMPLATE_CHARS,
+                "Paste a template or choose a file to upload.",
+            )
+            if stack_name and not STACK_NAME_RE.match(stack_name):
+                raise InputError(
+                    "Stack name must start with a letter and contain only letters, digits and "
+                    "'-', at most 128 characters."
+                )
+            if provider not in PROVIDERS:
+                raise InputError("Provider must be 'aws' or 'awscc'.")
+            if layout not in LAYOUTS:
+                raise InputError("Layout must be 'files' or 'single'.")
+        except InputError as exc:
+            return context | {"error": str(exc)}, 400
+
+        payload: dict[str, Any] = {
+            "template": context["template"],
+            "provider": provider,
+            "layout": layout,
+            "include_imports": include_imports,
+        }
+        if stack_name:
+            payload["stack_name"] = stack_name
+        try:
+            status, body = await request.app.state.api.post("/convert/cfn-to-terraform", payload)
+        except ApiUnavailableError as exc:
+            logger.error("converter-api unavailable: %s", exc)
+            return context | {"error": UNAVAILABLE}, 502
+
+        if status == 200 and body.get("success") and isinstance(body.get("files"), list):
+            return context | {
+                "files": body["files"],
+                "notes": body.get("notes", []),
+                "resources": body.get("resources", []),
+                "summary": body.get("summary", {}),
+                "source": body.get("source", "cloudformation"),
+            }, 200
+        error = body.get("error") or "The converter couldn't process this input."
+        return context | {
+            "error": error,
+            "error_line": body.get("line"),
+            "error_column": body.get("column"),
+        }, 400
+
+    @app.post("/cfn-to-terraform", response_class=HTMLResponse)
+    async def cfn_convert(
+        request: Request,
+        template: str = Form(""),
+        template_file: UploadFile | None = None,
+        provider: str = Form("aws"),
+        layout: str = Form("files"),
+        stack_name: str = Form(""),
+        include_imports: bool = Form(False),
+    ) -> HTMLResponse:
+        context, status = await convert_cfn(
+            request, template, template_file, provider, layout, stack_name, include_imports
+        )
+        return tool_page(
+            request, "cfn_to_terraform.html", "_terraform_result.html", context, status
+        )
+
+    @app.post("/cfn-to-terraform/zip")
+    async def cfn_zip(
+        request: Request,
+        template: str = Form(""),
+        template_file: UploadFile | None = None,
+        provider: str = Form("aws"),
+        layout: str = Form("files"),
+        stack_name: str = Form(""),
+        include_imports: bool = Form(False),
+    ) -> Response:
+        """The same conversion, downloaded as a zip of the .tf files and the notes."""
+        context, status = await convert_cfn(
+            request, template, template_file, provider, layout, stack_name, include_imports
+        )
+        if status != 200:
+            return page(request, "cfn_to_terraform.html", context, status)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for file in context["files"]:
+                archive.writestr(file["path"], file["content"])
+            archive.writestr(
+                "CONVERSION_NOTES.md", notes_markdown(context["notes"], context["source"])
+            )
+        buffer.seek(0)
+        return StreamingResponse(
+            buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="terraform.zip"'},
         )
 
     # --- YAML check -----------------------------------------------------------------------

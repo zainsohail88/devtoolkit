@@ -1,4 +1,5 @@
-// DevToolkit's YAML editor: CodeMirror 6, bundled by esbuild into static/vendor/editor.js.
+// DevToolkit's code editor: CodeMirror 6 with YAML and HCL (Terraform) highlighting, bundled
+// by esbuild into static/vendor/editor.js.
 // Everything visual comes from the design tokens (CSS custom properties), so the editor
 // follows the light/dark theme like the rest of the page.
 import { EditorState } from "@codemirror/state";
@@ -21,10 +22,83 @@ import {
   bracketMatching,
   foldGutter,
   indentUnit,
+  StreamLanguage,
 } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { lintGutter, setDiagnostics } from "@codemirror/lint";
 import { yaml } from "@codemirror/lang-yaml";
+
+// Terraform's HCL. CodeMirror has no official HCL package, and highlighting is all the output
+// panels need, so a small stream tokenizer does: comments, strings with ${...}, numbers,
+// true/false/null, block types at the start of a line, and attribute names before `=`.
+const HCL_BLOCKS = new Set([
+  "resource", "data", "variable", "output", "locals", "module", "provider", "terraform",
+  "import", "moved", "removed", "check", "dynamic", "content", "lifecycle", "validation",
+]);
+const hcl = StreamLanguage.define({
+  name: "hcl",
+  startState: () => ({ inString: false, depth: 0, inComment: false }),
+  token(stream, state) {
+    if (state.inComment) {
+      if (stream.skipTo("*/")) {
+        stream.match("*/");
+        state.inComment = false;
+      } else {
+        stream.skipToEnd();
+      }
+      return "comment";
+    }
+    if (state.inString) {
+      if (state.depth > 0) {
+        if (stream.match("}")) {
+          state.depth -= 1;
+          return "meta";
+        }
+      } else {
+        if (stream.match("${") || stream.match("%{")) {
+          state.depth += 1;
+          return "meta";
+        }
+        while (!stream.eol()) {
+          const next = stream.peek();
+          if (next === '"') {
+            stream.next();
+            state.inString = false;
+            return "string";
+          }
+          if ((next === "$" || next === "%") && stream.string.charAt(stream.pos + 1) === "{") break;
+          if (next === "\\") stream.next();
+          stream.next();
+        }
+        return "string";
+      }
+    }
+    if (stream.eatSpace()) return null;
+    if (stream.match("#") || stream.match("//")) {
+      stream.skipToEnd();
+      return "comment";
+    }
+    if (stream.match("/*")) {
+      state.inComment = true;
+      return "comment";
+    }
+    if (stream.peek() === '"') {
+      stream.next();
+      state.inString = true;
+      return "string";
+    }
+    if (stream.match(/^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?/)) return "number";
+    if (stream.match(/^(true|false|null)\b/)) return "bool";
+    const word = stream.match(/^[A-Za-z_][A-Za-z0-9_-]*/);
+    if (word) {
+      if (stream.match(/^\s*=(?!=)/, false)) return "propertyName";
+      if (HCL_BLOCKS.has(word[0]) && stream.string.slice(0, stream.start).trim() === "") return "keyword";
+      return "variableName";
+    }
+    stream.next();
+    return "punctuation";
+  },
+});
 
 const theme = EditorView.theme({
   "&": {
@@ -79,7 +153,7 @@ const highlight = HighlightStyle.define([
 
 /**
  * Create an editor in `parent`.
- * options: { doc, readOnly, placeholder, onChange(text) }
+ * options: { doc, readOnly, placeholder, onChange(text), language: "yaml" | "hcl" }
  * returns:  { view, getValue(), setValue(text), setError(line, column, message), clearErrors(), focus() }
  */
 export function create(parent, options = {}) {
@@ -99,7 +173,7 @@ export function create(parent, options = {}) {
     EditorState.tabSize.of(2),
     EditorView.lineWrapping,
     keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
-    yaml(),
+    options.language === "hcl" ? hcl : yaml(),
     syntaxHighlighting(highlight),
     theme,
   ];

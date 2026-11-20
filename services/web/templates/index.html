@@ -8,11 +8,17 @@
 
 <section aria-labelledby="tools-heading">
   <h2 id="tools-heading" class="text-small font-medium uppercase tracking-wide text-ink-muted">Tools</h2>
-  <div class="mt-4 grid gap-4 sm:grid-cols-2">
+  <div class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
     <a href="/compose-to-k8s" class="card group">
       <span class="inline-flex size-10 items-center justify-center rounded-md bg-accent-soft text-ink-on-accent-soft">{% include "icons/boxes.svg" %}</span>
       <h3 class="mt-4 text-step-1 font-semibold">Docker Compose → Kubernetes</h3>
       <p class="mt-1 text-small text-ink-muted">One file per resource, or a Helm chart. Health checks become probes, <code class="font-mono">depends_on</code> becomes init containers, named volumes become claims.</p>
+      <span class="mt-4 inline-flex items-center gap-1 text-small font-medium text-accent">Open <span class="transition-transform group-hover:translate-x-1">{% include "icons/arrow-right.svg" %}</span></span>
+    </a>
+    <a href="/cfn-to-terraform" class="card group">
+      <span class="inline-flex size-10 items-center justify-center rounded-md bg-accent-soft text-ink-on-accent-soft">{% include "icons/layers.svg" %}</span>
+      <h3 class="mt-4 text-step-1 font-semibold">CloudFormation → Terraform</h3>
+      <p class="mt-1 text-small text-ink-muted">CloudFormation, AWS SAM and <code class="font-mono">cdk synth</code> templates. Parameters become variables, <code class="font-mono">!Ref</code> and <code class="font-mono">!Sub</code> become expressions, SAM functions become the resources SAM would create.</p>
       <span class="mt-4 inline-flex items-center gap-1 text-small font-medium text-accent">Open <span class="transition-transform group-hover:translate-x-1">{% include "icons/arrow-right.svg" %}</span></span>
     </a>
     <a href="/validate-yaml" class="card group">

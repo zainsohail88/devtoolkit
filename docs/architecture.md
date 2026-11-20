@@ -4,7 +4,7 @@
 
 | Service | What it does | Port | Reachable from |
 |---------|--------------|------|----------------|
-| `web` | Serves the pages (Docker Compose → Kubernetes, YAML validator). Calls `converter-api` from the server side. | 8080 | Users |
+| `web` | Serves the pages (Docker Compose → Kubernetes, CloudFormation → Terraform, YAML validator). Calls `converter-api` from the server side. | 8080 | Users |
 | `converter-api` | The conversions, as a JSON API | 8000 | `web` only |
 
 Browsers never talk to `converter-api`. In the cluster a [NetworkPolicy](../k8s/converter-api/networkpolicy.yaml) allows traffic to it only from `web` pods. This keeps one place (`web`) responsible for input handling and output pages, and lets the API change without breaking anyone who might have scripted against it.
@@ -16,18 +16,24 @@ services/
   converter-api/          FastAPI service: the conversions
     main.py               HTTP endpoints
     converters/           Conversion logic (pure functions, no FastAPI)
-    tests/                pytest tests
+      compose_to_k8s.py   Docker Compose to Kubernetes
+      render.py           Manifests as files, or a Helm chart
+      cfn/                CloudFormation, SAM and CDK to Terraform: parse, SAM expansion, CDK
+                          clean-up, intrinsic functions, HCL rendering, resources/ (hand-written
+                          aws provider mappings), awscc_index.json (the awscc provider's types)
+    tools/                Developer scripts: rebuild the awscc index, run terraform validate
+    tests/                pytest tests; fixtures/cfn/ holds templates checked with Terraform
     Dockerfile            Multi-stage build, non-root user
   web/                    FastAPI + Jinja2 service: the pages
     main.py               Routes, form handling, result fragments, zip download, security headers
     api_client.py         Calls converter-api (with a Google identity token on Cloud Run)
-    templates/            Jinja2 templates: index, the two tools, result fragments, error page
+    templates/            Jinja2 templates: index, one per tool, result fragments, error page
       icons/              Lucide icons (ISC) and the GitHub mark (Simple Icons, CC0), inlined
     static/               app.js (editors, in-place results, theme, copy/download);
                           app.css and vendor/editor.js are built, not committed
     styles/input.css      The design system: every colour, size and radius as a token, light
                           and dark values, and the component classes. Compiled by Tailwind.
-    editor/               CodeMirror 6 YAML editor: src/editor.js plus pinned npm dependencies,
+    editor/               CodeMirror 6 editor (YAML, and HCL for Terraform output): src/editor.js plus pinned npm dependencies,
                           bundled by esbuild into static/vendor/editor.js
     tests/                pytest tests; converter-api is replaced by a fake
     Dockerfile            Multi-stage build: Python deps, Tailwind CLI, Node (editor), runtime
@@ -74,6 +80,6 @@ Both Dockerfiles use the official slim Python image (the exact version is set in
 
 ## How a page works
 
-Every page works without JavaScript: the form posts, the server renders the whole page again with the result. With JavaScript, `app.js` posts the same form with an `X-Requested-With: fetch` header, the server returns only the result fragment (`_result.html` or `_validation.html`), and the script swaps it in place, turns the file list into tabs, mounts a read-only editor per file, and marks the error line in the input editor from the fragment's `data-error-line` attribute. The zip download is a plain form post to `/compose-to-k8s/zip`.
+Every page works without JavaScript: the form posts, the server renders the whole page again with the result. With JavaScript, `app.js` posts the same form with an `X-Requested-With: fetch` header, the server returns only the result fragment (`_result.html`, `_terraform_result.html` or `_validation.html`), and the script swaps it in place, turns the file list into tabs, mounts a read-only editor per file, and marks the error line in the input editor from the fragment's `data-error-line` attribute. The zip downloads are plain form posts to `/compose-to-k8s/zip` and `/cfn-to-terraform/zip`.
 
 Images are published to GitHub Container Registry, one per service, tagged with the commit SHA and `latest`. Each image name is set once, in `k8s/<service>/deployment.yaml`; scripts and CI read it from there. See [CI/CD](operations/ci-cd.md).

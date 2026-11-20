@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Databases, keys, secrets and parameters
+Parameters:
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: subnet-11111111,subnet-22222222
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: sg-12345678
+  DbPassword:
+    Type: String
+    NoEcho: true
+    Default: change-me-please
+Resources:
+  DataKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Data encryption key
+      EnableKeyRotation: true
+      Enabled: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      MultiRegion: false
+      PendingWindowInDays: 7
+      RotationPeriodInDays: 365
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Root
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+      Tags:
+        - Key: app
+          Value: shop
+  DataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/shop-data
+      TargetKeyId: !Ref DataKey
+  DbSubnets:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: shop-db
+      DBSubnetGroupDescription: Database subnets
+      SubnetIds: !Ref SubnetIds
+      Tags:
+        - Key: app
+          Value: shop
+  DbParams:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      DBParameterGroupName: shop-postgres
+      Description: Postgres settings
+      Family: postgres16
+      Parameters:
+        log_min_duration_statement: 500
+        rds.force_ssl: "1"
+      Tags:
+        - Key: app
+          Value: shop
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: shop-db
+      Engine: postgres
+      EngineVersion: "16.4"
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: "20"
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !GetAtt DataKey.Arn
+      MasterUsername: shop
+      ManageMasterUserPassword: true
+      MasterUserSecret:
+        KmsKeyId: !Ref DataKey
+      DBName: shop
+      Port: "5432"
+      MultiAZ: false
+      PubliclyAccessible: false
+      VPCSecurityGroups:
+        - !Ref SecurityGroupId
+      DBSubnetGroupName: !Ref DbSubnets
+      DBParameterGroupName: !Ref DbParams
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: 03:00-04:00
+      PreferredMaintenanceWindow: sun:05:00-sun:06:00
+      DeletionProtection: true
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      EnableIAMDatabaseAuthentication: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      EnableCloudwatchLogsExports: [postgresql]
+      Tags:
+        - Key: app
+          Value: shop
+  ScratchDb:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      Engine: mysql
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: 20
+      MasterUsername: admin
+      MasterUserPassword: !Ref DbPassword
+  Cluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    Properties:
+      DBClusterIdentifier: shop-cluster
+      Engine: aurora-postgresql
+      EngineVersion: "16.4"
+      DatabaseName: shop
+      MasterUsername: shop
+      ManageMasterUserPassword: true
+      Port: 5432
+      DBSubnetGroupName: !Ref DbSubnets
+      VpcSecurityGroupIds: [!Ref SecurityGroupId]
+      BackupRetentionPeriod: 7
+      StorageEncrypted: true
+      KmsKeyId: !GetAtt DataKey.Arn
+      DeletionProtection: true
+      EnableHttpEndpoint: true
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0.5
+        MaxCapacity: 4
+      Tags:
+        - Key: app
+          Value: shop
+  ApiKey:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: shop/api-key
+      Description: Third-party API key
+      KmsKeyId: !Ref DataKey
+      SecretString: '{"key": "replace-me"}'
+      ReplicaRegions:
+        - Region: eu-west-1
+      Tags:
+        - Key: app
+          Value: shop
+  Endpoint:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /shop/db/endpoint
+      Type: String
+      Value: !GetAtt Database.Endpoint.Address
+      Description: Database endpoint
+      Tier: Standard
+      DataType: text
+      Tags:
+        app: shop
+  Hosts:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: StringList
+      Value: a,b
+      AllowedPattern: "^[a-z,]+$"
+Outputs:
+  DbAddress:
+    Value: !GetAtt Database.Endpoint.Address
+  DbPort:
+    Value: !GetAtt Database.Endpoint.Port
+  DbSecret:
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
+  ClusterEndpoint:
+    Value: !GetAtt Cluster.Endpoint.Address
+  KeyArn:
+    Value: !GetAtt DataKey.Arn
+  SecretArn:
+    Value: !Ref ApiKey

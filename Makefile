@@ -6,7 +6,7 @@ KIND_VERSION := $(shell awk '$$1 == "kind" {print $$2}' .tool-versions)
 TAILWIND_VERSION := $(shell sed -n -E 's/^ARG TAILWIND_VERSION=(.*)/\1/p' services/web/Dockerfile)
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test run run-web css editor build validate-k8s cluster-up cluster-down deploy-local port-forward clean
+.PHONY: help install lint format test run run-web css editor build validate-k8s validate-terraform cluster-up cluster-down deploy-local port-forward clean
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -54,6 +54,9 @@ build: ## Build every service's Docker image
 
 validate-k8s: ## Validate K8s manifests with kubeconform
 	kubeconform -strict -summary k8s/
+
+validate-terraform: ## Convert the CloudFormation fixtures and run terraform validate on them (needs terraform)
+	cd services/converter-api && ../../$(BIN)/python tools/validate_terraform.py
 
 cluster-up: ## Create the local kind cluster (no-op if it exists)
 	@kind version | grep -q '$(KIND_VERSION) ' \

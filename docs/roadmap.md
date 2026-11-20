@@ -13,7 +13,6 @@ gantt
     axisFormat %b %Y
 
     section Q1 2027
-    AWS to Terraform                 :t1, 2027-01-01, 2027-02-14
     Two-way CI converter             :t2, 2027-02-15, 2027-03-31
 
     section Q2 2027
@@ -32,7 +31,6 @@ gantt
 
 | # | Feature | What it does | Why it's needed |
 |---|---------|--------------|-----------------|
-| 1 | **AWS → Terraform** | CloudFormation (JSON/YAML), AWS SAM and AWS CDK (via `cdk synth` output) → Terraform | Only one CloudFormation converter exists, and none for CDK |
 | 2 | **Two-way CI converter** | Any direction between GitHub Actions, GitLab CI, CircleCI, Jenkins (declarative) and Azure Pipelines | Existing tools convert one way only, into GitHub Actions |
 | 3 | **Kubernetes → Docker Compose** | Deployments, Services, ConfigMaps → Compose services | No maintained tool goes this direction |
 | 4 | **Compose / Kubernetes ↔ AWS ECS** | Both directions between Compose, Kubernetes and ECS task definitions | Existing tools are stale or only partly cover Compose |
@@ -49,6 +47,7 @@ Every converter follows the same rule as the existing one: anything it can't con
 ## Done
 
 - `converter-api` (FastAPI): Docker Compose to Kubernetes, YAML validation
+- **AWS → Terraform** ([#9](https://github.com/zainsohail88/devtoolkit/issues/9)): CloudFormation (JSON/YAML), AWS SAM and AWS CDK (`cdk synth` output) to Terraform, with hand-written `aws` provider mappings for 85 common types and the `awscc` provider for the rest; output checked with `terraform validate` in CI. See [CloudFormation to Terraform](reference/cloudformation-to-terraform.md)
 - `web` (FastAPI + Jinja2 + Tailwind): a page per tool, calls the API server-side; the API is reachable from `web` only
 - Raw Kubernetes manifests: probes, resource limits, non-root, restricted Pod Security, NetworkPolicy
 - CI: lint, tests with a 95% coverage gate, Docker builds, manifest validation, end-to-end on kind including the NetworkPolicy

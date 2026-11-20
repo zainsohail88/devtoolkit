@@ -233,6 +233,14 @@
   .tag {
     @apply inline-flex items-center gap-1 rounded-full bg-accent-soft px-3 py-1 text-small font-medium text-ink-on-accent-soft;
   }
+  /* Counts and labels that are not a call to act: same tag, no accent. */
+  .tag-neutral {
+    @apply bg-surface-sunken text-ink-muted;
+  }
+  /* Something the tool could not do. */
+  .tag-danger {
+    @apply bg-danger-soft text-ink-on-danger-soft;
+  }
   .nav-link {
     @apply inline-flex min-h-11 items-center gap-2 text-small text-ink-muted hover:text-ink;
   }

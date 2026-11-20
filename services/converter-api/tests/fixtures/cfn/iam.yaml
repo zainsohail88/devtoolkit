@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: IAM roles, policies, users and groups
+Resources:
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: app-role
+      Description: Role for the app
+      Path: /service/
+      MaxSessionDuration: 7200
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - !Ref ReadPolicy
+      Policies:
+        - PolicyName: read-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:GetLogEvents]
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*
+      Tags:
+        - Key: team
+          Value: platform
+  ReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: read-only-s3
+      Description: Read S3
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: "*"
+      Groups:
+        - !Ref Developers
+  ExtraPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: extra
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sqs:SendMessage
+            Resource: "*"
+      Roles:
+        - !Ref AppRole
+      Users:
+        - !Ref Deployer
+  Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: app-profile
+      Path: /
+      Roles:
+        - !Ref AppRole
+  Deployer:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: deployer
+      Path: /
+      Groups:
+        - !Ref Developers
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:*
+                Resource: "*"
+      Tags:
+        - Key: team
+          Value: platform
+  Developers:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: developers
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      Policies:
+        - PolicyName: describe
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ec2:Describe*
+                Resource: "*"
+Outputs:
+  RoleArn:
+    Value: !GetAtt AppRole.Arn
+  RoleId:
+    Value: !GetAtt AppRole.RoleId
+  PolicyArn:
+    Value: !Ref ReadPolicy
+  ProfileArn:
+    Value: !GetAtt Profile.Arn

@@ -16,15 +16,19 @@ Install [kubeconform](https://github.com/yannh/kubeconform) if you change anythi
 
 ## Adding a new converter
 
-Example: adding a CloudFormation to Terraform converter.
+Example: adding a Kubernetes to Docker Compose converter.
 
-1. **Logic.** Create `services/converter-api/converters/cfn_to_terraform.py`. Keep it pure: functions take strings or dicts and return dicts. No FastAPI imports in here, which keeps the logic easy to test.
+1. **Logic.** Create `services/converter-api/converters/k8s_to_compose.py` (or a package, like `converters/cfn/`, when it grows). Keep it pure: functions take strings or dicts and return dicts. No FastAPI imports in here, which keeps the logic easy to test.
    - A `parse_...()` function that validates input and raises a clear error.
    - One or more `convert_...()` functions.
 2. **Endpoint.** Add a route in `services/converter-api/main.py`. Use a Pydantic request model with a `max_length` on text fields. Return `{"success": true, ...}` on success and HTTP 400 with `{"success": false, "error": "..."}` for bad input.
-3. **Tests.** Add `tests/test_cfn_to_terraform.py`, covering the happy path, each supported input format, and every error branch. CI fails under 95% coverage, and the current code is at 100%. Please keep it there.
+3. **Tests.** Add `tests/test_k8s_to_compose.py`, covering the happy path, each supported input format, and every error branch. CI fails under 95% coverage, and the current code is at 100%. Please keep it there.
 4. **Page.** Add a template in `services/web/templates/` and a GET/POST route pair in `services/web/main.py`, following `compose_to_k8s.html`. Link it from `index.html` and `base.html`. Test it in `services/web/tests/` with the fake API from `conftest.py`.
-5. **Docs.** Add the endpoint to `docs/reference/api.md` and its rules to `docs/reference/conversion-rules.md`. Keep `README.md` to the overview and quick start.
+5. **Docs.** Add the endpoint to `docs/reference/api.md` and its rules to a page in `docs/reference/`. Keep `README.md` to the overview and quick start.
+
+### CloudFormation to Terraform mappings
+
+A CloudFormation type gets a hand-written `aws` provider mapping in `services/converter-api/converters/cfn/resources/`: a function decorated with `@resource("AWS::X::Y", "aws_x_y", ref=..., attrs={...})` that takes properties one at a time from `b.props` (`attr`, `number`, `json`, `tags`, `block`...). Whatever it leaves is kept as a comment and reported in the notes automatically. Check attribute names against the provider schema (`terraform providers schema -json`), add the type to a fixture in `tests/fixtures/cfn/`, and run `make validate-terraform` (needs Terraform). Types without a mapping use the `awscc` provider through `converters/cfn/awscc_index.json`; rebuild that with `tools/build_awscc_index.py` when bumping the awscc version.
 
 ## Adding a new service
 

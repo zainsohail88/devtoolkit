@@ -4,8 +4,10 @@ import base64
 import hashlib
 import io
 import re
+import sys
 import zipfile
 from html.parser import HTMLParser
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,6 +18,7 @@ from main import (
     HTML_CACHE,
     MAX_BODY_BYTES,
     MAX_INPUT_CHARS,
+    MAX_TEMPLATE_CHARS,
     SECURITY_HEADERS,
     STATIC_CACHE,
     create_app,
@@ -532,3 +535,221 @@ def test_other_http_errors_render_the_error_page(fake_api):
     assert response.headers["content-type"].startswith("text/html")
     assert "Down for maintenance" in response.text
     assert 'href="/"' in response.text
+
+
+# --- CloudFormation -> Terraform -------------------------------------------------------------
+
+TEMPLATE = "Resources:\n  Bucket:\n    Type: AWS::S3::Bucket\n"
+TF_FILES = [
+    {"path": "versions.tf", "content": 'terraform {\n  required_version = ">= 1.5"\n}\n'},
+    {"path": "main.tf", "content": 'resource "aws_s3_bucket" "bucket" {}\n'},
+]
+TF_RESOURCES = [
+    {
+        "logical_id": "Bucket",
+        "type": "AWS::S3::Bucket",
+        "address": "aws_s3_bucket.bucket",
+        "status": "aws",
+    },
+    {"logical_id": "Hook", "type": "Custom::Hook", "address": None, "status": "unsupported"},
+]
+
+
+def ok_terraform(fake_api, notes=(), source="sam"):
+    fake_api.body = {
+        "success": True,
+        "source": source,
+        "files": TF_FILES,
+        "notes": list(notes),
+        "resources": TF_RESOURCES,
+        "summary": {"resources": 2, "aws": 1, "awscc": 0, "unsupported": 1},
+    }
+
+
+def test_cfn_form_renders_empty_state_and_examples(client):
+    html = client.get("/cfn-to-terraform").text
+    assert 'name="template"' in html
+    assert 'name="provider" value="aws" checked' in html
+    assert 'name="layout" value="files" checked' in html
+    assert 'name="include_imports" value="true" >' in html
+    assert html.count("data-load-example") == 3
+    assert "data-empty" in html and "data-zip hidden" in html
+    assert 'href="/cfn-to-terraform" class="nav-link" aria-current="page"' in html
+
+
+def test_cfn_nav_and_index_card(client):
+    html = client.get("/").text
+    assert 'href="/cfn-to-terraform" class="card' in html
+    assert 'href="/cfn-to-terraform" class="nav-link">' in html
+
+
+@pytest.mark.parametrize(
+    ("example", "marker"),
+    [
+        ("cloudformation", "Resizer"),
+        ("sam", "Serverless"),
+        ("cdk", "CDKMetadata"),
+        ("nope", "Resizer"),
+    ],
+)
+def test_cfn_examples(client, example, marker):
+    text = client.get(f"/cfn-to-terraform?example={example}", headers={"Accept": "text/plain"}).text
+    assert marker in text
+    html = client.get(f"/cfn-to-terraform?example={example}").text
+    assert "<html" in html and marker in html
+
+
+def test_examples_are_valid_templates():
+    from main import EXAMPLES
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "converter-api"))
+    try:
+        from converters.cfn import convert_template
+    except ImportError:  # pragma: no cover - the web service tested on its own
+        pytest.skip("converter-api is not next to web")
+    for name, text in EXAMPLES.items():
+        result = convert_template(text, stack_name="demo")
+        assert result["source"] == name
+        assert result["summary"]["unsupported"] == 0
+        assert not [n for n in result["notes"] if "was not converted" in n]
+
+
+def test_cfn_convert_renders_summary_files_resources_and_notes(client, fake_api):
+    ok_terraform(fake_api, notes=["Hook (Custom::Hook) was not converted"])
+    response = client.post(
+        "/cfn-to-terraform",
+        data={
+            "template": TEMPLATE,
+            "provider": "awscc",
+            "layout": "single",
+            "stack_name": " shop ",
+            "include_imports": "true",
+        },
+    )
+    assert response.status_code == 200
+    assert fake_api.requests == [
+        (
+            "/convert/cfn-to-terraform",
+            {
+                "template": TEMPLATE,
+                "provider": "awscc",
+                "layout": "single",
+                "include_imports": True,
+                "stack_name": "shop",
+            },
+        )
+    ]
+    html = response.text
+    assert "AWS SAM" in html
+    assert "2 resources:" in html and "1 aws" in html and "1 not converted" in html
+    assert "awscc</span>" not in html  # no awscc count when there are none
+    assert 'data-path="main.tf"' in html and "aws_s3_bucket" in html
+    assert "Where each resource went (2)" in html
+    assert "aws_s3_bucket.bucket" in html and "Custom::Hook" in html
+    assert "Needs a decision (1)" in html
+    assert 'name="provider" value="awscc" checked' in html
+    assert 'value="shop"' in html
+
+
+def test_cfn_convert_fragment_without_stack_name(client, fake_api):
+    ok_terraform(fake_api, source="cloudformation")
+    response = client.post("/cfn-to-terraform", data={"template": TEMPLATE}, headers=FRAGMENT)
+    assert response.status_code == 200
+    assert "<html" not in response.text
+    assert "stack_name" not in fake_api.requests[0][1]
+    assert "CloudFormation" in response.text
+
+
+def test_cfn_convert_from_upload(client, fake_api):
+    ok_terraform(fake_api)
+    response = client.post(
+        "/cfn-to-terraform",
+        data={"template": ""},
+        files={"template_file": ("template.json", b'{"Resources": {}}', "application/json")},
+    )
+    assert response.status_code == 200
+    assert fake_api.requests[0][1]["template"] == '{"Resources": {}}'
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"template": " "}, "Paste a template"),
+        ({"template": "a" * (MAX_TEMPLATE_CHARS + 1)}, "longer than 500,000"),
+        ({"template": TEMPLATE, "stack_name": "1bad"}, "Stack name must start"),
+        ({"template": TEMPLATE, "provider": "gcp"}, "Provider must be"),
+        ({"template": TEMPLATE, "layout": "tree"}, "Layout must be"),
+    ],
+)
+def test_cfn_input_rejected_before_calling_api(client, fake_api, data, message):
+    response = client.post("/cfn-to-terraform", data=data)
+    assert response.status_code == 400
+    assert message in response.text
+    assert fake_api.requests == []
+
+
+def test_a_template_larger_than_the_compose_limit_is_accepted(client, fake_api):
+    ok_terraform(fake_api)
+    big = TEMPLATE + "#" * (MAX_INPUT_CHARS * 2)
+    response = client.post("/cfn-to-terraform", data={"template": big})
+    assert response.status_code == 200
+
+
+def test_cfn_rejected_by_api_with_position(client, fake_api):
+    fake_api.status = 400
+    fake_api.body = {"success": False, "error": "Invalid YAML: bad", "line": 4, "column": 1}
+    response = client.post("/cfn-to-terraform", data={"template": TEMPLATE}, headers=FRAGMENT)
+    assert response.status_code == 400
+    assert 'data-error-line="4"' in response.text
+    assert "data-files" not in response.text and "data-empty" not in response.text
+
+
+def test_cfn_unexpected_answer_and_outage(client, fake_api):
+    fake_api.status = 422
+    fake_api.body = {"detail": []}
+    response = client.post("/cfn-to-terraform", data={"template": TEMPLATE})
+    assert response.status_code == 400
+    assert "couldn&#39;t process this input" in response.text
+    fake_api.status = 503
+    response = client.post("/cfn-to-terraform", data={"template": TEMPLATE})
+    assert response.status_code == 502
+    assert "unavailable right now" in response.text
+
+
+def test_cfn_zip_has_files_and_notes(client, fake_api):
+    ok_terraform(fake_api, notes=["Check the bucket name"])
+    response = client.post("/cfn-to-terraform/zip", data={"template": TEMPLATE})
+    assert response.status_code == 200
+    assert 'filename="terraform.zip"' in response.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["versions.tf", "main.tf", "CONVERSION_NOTES.md"]
+        notes = archive.read("CONVERSION_NOTES.md").decode()
+    assert "Converted from AWS SAM by DevToolkit" in notes
+    assert "- Check the bucket name" in notes
+
+
+def test_cfn_zip_without_notes_and_after_an_error(client, fake_api):
+    ok_terraform(fake_api, source="unknown-kind")
+    response = client.post("/cfn-to-terraform/zip", data={"template": TEMPLATE})
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        notes = archive.read("CONVERSION_NOTES.md").decode()
+    assert (
+        "Converted from unknown-kind" in notes
+        and "- Nothing: every resource was converted." in notes
+    )
+    fake_api.status = 400
+    fake_api.body = {"success": False, "error": "No resources"}
+    response = client.post("/cfn-to-terraform/zip", data={"template": TEMPLATE})
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("text/html")
+
+
+def test_cfn_output_is_escaped(client, fake_api):
+    ok_terraform(fake_api, notes=["<b>x</b>"])
+    fake_api.body["files"] = [{"path": "<i>.tf", "content": "<script>alert(1)</script>"}]
+    fake_api.body["resources"] = [
+        {"logical_id": "<u>", "type": "T", "address": None, "status": "unsupported"}
+    ]
+    html = client.post("/cfn-to-terraform", data={"template": TEMPLATE}).text
+    assert "<script>alert(1)</script>" not in html and "<b>x</b>" not in html and "<u>" not in html
+    assert len(inline_scripts(html)) == 1

@@ -1,0 +1,312 @@
+"""RDS, KMS, Secrets Manager and SSM Parameter Store."""
+
+from __future__ import annotations
+
+from converters.cfn.builder import Builder, Props
+from converters.cfn.context import intrinsic_name
+from converters.cfn.hcl import Attr, Block
+from converters.cfn.naming import identifier
+from converters.cfn.resources import resource
+
+# --- RDS --------------------------------------------------------------------------------
+
+
+def _final_snapshot(b: Builder, identifier_prop: str) -> list[Attr]:
+    """CloudFormation snapshots DB instances and clusters on delete unless DeletionPolicy is
+    Delete. Terraform's default is the opposite, so spell it out. Call before the identifier
+    property is taken; add the returned attributes at the end."""
+    if b.resource.get("DeletionPolicy") == "Delete":
+        return [Attr("skip_final_snapshot", True)]
+    name = b.props.peek(identifier_prop)
+    base = name if isinstance(name, str) else identifier(b.logical_id).replace("_", "-")
+    if b.resource.get("DeletionPolicy") is None:
+        b.ctx.note(
+            f"{b.logical_id}: CloudFormation snapshots this database on delete by default; "
+            f"Terraform does the same here, naming the snapshot '{base}-final-snapshot'"
+        )
+    return [
+        Attr("skip_final_snapshot", False),
+        Attr("final_snapshot_identifier", f"{base}-final-snapshot"),
+    ]
+
+
+def _password(b: Builder, tf_name: str) -> None:
+    if b.props.attr(tf_name, "MasterUserPassword"):
+        b.ctx.note(
+            f"{b.logical_id}: the master password ends up in the Terraform state; prefer "
+            "manage_master_user_password = true (a Secrets Manager secret) or a write-only "
+            f"{tf_name}_wo argument"
+        )
+
+
+def _master_secret(b: Builder) -> None:
+    secret = b.props.take("MasterUserSecret")
+    if isinstance(secret, dict) and secret.get("KmsKeyId") is not None:
+        b.props.set("master_user_secret_kms_key_id", b.ctx.expr(secret["KmsKeyId"]))
+
+
+@resource(
+    "AWS::RDS::DBInstance",
+    "aws_db_instance",
+    ref="identifier",
+    attrs={
+        "Endpoint.Address": "address",
+        "Endpoint.Port": "port",
+        "Endpoint.HostedZoneId": "hosted_zone_id",
+        "DBInstanceArn": "arn",
+        "DbiResourceId": "resource_id",
+        "MasterUserSecret.SecretArn": "master_user_secret[0].secret_arn",
+    },
+    import_id="DBInstanceIdentifier",
+)
+def db_instance(b: Builder) -> None:
+    p = b.props
+    snapshot = _final_snapshot(b, "DBInstanceIdentifier")
+    p.attrs(
+        {
+            "identifier": "DBInstanceIdentifier",
+            "engine": "Engine",
+            "engine_version": "EngineVersion",
+            "instance_class": "DBInstanceClass",
+            "storage_type": "StorageType",
+            "kms_key_id": "KmsKeyId",
+            "username": "MasterUsername",
+            "db_name": "DBName",
+            "db_subnet_group_name": "DBSubnetGroupName",
+            "parameter_group_name": "DBParameterGroupName",
+            "option_group_name": "OptionGroupName",
+            "backup_window": "PreferredBackupWindow",
+            "maintenance_window": "PreferredMaintenanceWindow",
+            "performance_insights_kms_key_id": "PerformanceInsightsKMSKeyId",
+            "monitoring_role_arn": "MonitoringRoleArn",
+            "availability_zone": "AvailabilityZone",
+            "ca_cert_identifier": "CACertificateIdentifier",
+            "license_model": "LicenseModel",
+            "snapshot_identifier": "DBSnapshotIdentifier",
+            "replicate_source_db": "SourceDBInstanceIdentifier",
+            "network_type": "NetworkType",
+            "character_set_name": "CharacterSetName",
+            "timezone": "Timezone",
+        }
+    )
+    for tf_name, cfn_name in (
+        ("allocated_storage", "AllocatedStorage"),
+        ("max_allocated_storage", "MaxAllocatedStorage"),
+        ("iops", "Iops"),
+        ("storage_throughput", "StorageThroughput"),
+        ("port", "Port"),
+        ("backup_retention_period", "BackupRetentionPeriod"),
+        ("monitoring_interval", "MonitoringInterval"),
+        ("performance_insights_retention_period", "PerformanceInsightsRetentionPeriod"),
+    ):
+        p.number(tf_name, cfn_name)
+    for tf_name, cfn_name in (
+        ("storage_encrypted", "StorageEncrypted"),
+        ("multi_az", "MultiAZ"),
+        ("publicly_accessible", "PubliclyAccessible"),
+        ("deletion_protection", "DeletionProtection"),
+        ("auto_minor_version_upgrade", "AutoMinorVersionUpgrade"),
+        ("allow_major_version_upgrade", "AllowMajorVersionUpgrade"),
+        ("copy_tags_to_snapshot", "CopyTagsToSnapshot"),
+        ("iam_database_authentication_enabled", "EnableIAMDatabaseAuthentication"),
+        ("performance_insights_enabled", "EnablePerformanceInsights"),
+        ("manage_master_user_password", "ManageMasterUserPassword"),
+        ("delete_automated_backups", "DeleteAutomatedBackups"),
+    ):
+        p.boolean(tf_name, cfn_name)
+    _password(b, "password")
+    _master_secret(b)
+    p.list_attr("vpc_security_group_ids", "VPCSecurityGroups")
+    p.list_attr("enabled_cloudwatch_logs_exports", "EnableCloudwatchLogsExports")
+    p.items.extend(snapshot)
+    p.tags()
+
+
+@resource(
+    "AWS::RDS::DBSubnetGroup", "aws_db_subnet_group", ref="name", import_id="DBSubnetGroupName"
+)
+def db_subnet_group(b: Builder) -> None:
+    p = b.props
+    p.attr("name", "DBSubnetGroupName")
+    p.attr("description", "DBSubnetGroupDescription")
+    p.list_attr("subnet_ids", "SubnetIds")
+    p.tags()
+
+
+@resource(
+    "AWS::RDS::DBParameterGroup",
+    "aws_db_parameter_group",
+    ref="name",
+    import_id="DBParameterGroupName",
+)
+def db_parameter_group(b: Builder) -> None:
+    p = b.props
+    p.attr("name", "DBParameterGroupName")
+    p.attr("description", "Description")
+    p.attr("family", "Family")
+    parameters = p.peek("Parameters")
+    if isinstance(parameters, dict) and intrinsic_name(parameters) is None:
+        p.drop("Parameters")
+        for name, value in parameters.items():
+            p.items.append(
+                Block(
+                    "parameter",
+                    [],
+                    [
+                        Attr("name", str(name)),
+                        Attr("value", b.ctx.expr(value) if isinstance(value, dict) else str(value)),
+                        # Static parameters only apply after a reboot, which is also what
+                        # CloudFormation does; "immediate" would fail for them.
+                        Attr("apply_method", "pending-reboot"),
+                    ],
+                )
+            )
+    p.tags()
+
+
+def _scaling_v2(s: Props) -> None:
+    s.number("min_capacity", "MinCapacity")
+    s.number("max_capacity", "MaxCapacity")
+    s.number("seconds_until_auto_pause", "SecondsUntilAutoPause")
+
+
+@resource(
+    "AWS::RDS::DBCluster",
+    "aws_rds_cluster",
+    ref="cluster_identifier",
+    attrs={
+        "Endpoint.Address": "endpoint",
+        "Endpoint.Port": "port",
+        "ReadEndpoint.Address": "reader_endpoint",
+        "DBClusterArn": "arn",
+        "DBClusterResourceId": "cluster_resource_id",
+        "MasterUserSecret.SecretArn": "master_user_secret[0].secret_arn",
+    },
+    import_id="DBClusterIdentifier",
+)
+def db_cluster(b: Builder) -> None:
+    p = b.props
+    snapshot = _final_snapshot(b, "DBClusterIdentifier")
+    p.attrs(
+        {
+            "cluster_identifier": "DBClusterIdentifier",
+            "engine": "Engine",
+            "engine_version": "EngineVersion",
+            "engine_mode": "EngineMode",
+            "database_name": "DatabaseName",
+            "master_username": "MasterUsername",
+            "db_subnet_group_name": "DBSubnetGroupName",
+            "db_cluster_parameter_group_name": "DBClusterParameterGroupName",
+            "db_cluster_instance_class": "DBClusterInstanceClass",
+            "preferred_backup_window": "PreferredBackupWindow",
+            "preferred_maintenance_window": "PreferredMaintenanceWindow",
+            "kms_key_id": "KmsKeyId",
+            "storage_type": "StorageType",
+            "network_type": "NetworkType",
+            "snapshot_identifier": "SnapshotIdentifier",
+        }
+    )
+    for tf_name, cfn_name in (
+        ("port", "Port"),
+        ("backup_retention_period", "BackupRetentionPeriod"),
+        ("allocated_storage", "AllocatedStorage"),
+        ("iops", "Iops"),
+    ):
+        p.number(tf_name, cfn_name)
+    for tf_name, cfn_name in (
+        ("storage_encrypted", "StorageEncrypted"),
+        ("deletion_protection", "DeletionProtection"),
+        ("iam_database_authentication_enabled", "EnableIAMDatabaseAuthentication"),
+        ("enable_http_endpoint", "EnableHttpEndpoint"),
+        ("copy_tags_to_snapshot", "CopyTagsToSnapshot"),
+        ("manage_master_user_password", "ManageMasterUserPassword"),
+    ):
+        p.boolean(tf_name, cfn_name)
+    _password(b, "master_password")
+    _master_secret(b)
+    p.list_attr("vpc_security_group_ids", "VpcSecurityGroupIds")
+    p.list_attr("enabled_cloudwatch_logs_exports", "EnableCloudwatchLogsExports")
+    p.block("serverlessv2_scaling_configuration", "ServerlessV2ScalingConfiguration", _scaling_v2)
+    p.items.extend(snapshot)
+    p.tags()
+
+
+# --- KMS --------------------------------------------------------------------------------
+
+
+@resource("AWS::KMS::Key", "aws_kms_key", ref="key_id", attrs={"Arn": "arn", "KeyId": "key_id"})
+def kms_key(b: Builder) -> None:
+    p = b.props
+    p.attr("description", "Description")
+    p.json("policy", "KeyPolicy")
+    p.boolean("enable_key_rotation", "EnableKeyRotation")
+    p.boolean("is_enabled", "Enabled")
+    p.attr("customer_master_key_spec", "KeySpec")
+    p.attr("key_usage", "KeyUsage")
+    p.boolean("multi_region", "MultiRegion")
+    p.number("deletion_window_in_days", "PendingWindowInDays")
+    p.number("rotation_period_in_days", "RotationPeriodInDays")
+    p.boolean("bypass_policy_lockout_safety_check", "BypassPolicyLockoutSafetyCheck")
+    p.tags()
+
+
+@resource("AWS::KMS::Alias", "aws_kms_alias", ref="name", import_id="AliasName")
+def kms_alias(b: Builder) -> None:
+    b.props.attr("name", "AliasName")
+    b.props.attr("target_key_id", "TargetKeyId")
+
+
+# --- Secrets Manager --------------------------------------------------------------------
+
+
+@resource("AWS::SecretsManager::Secret", "aws_secretsmanager_secret", ref="arn", attrs={"Id": "id"})
+def secretsmanager_secret(b: Builder) -> None:
+    p = b.props
+    p.attr("name", "Name")
+    p.attr("description", "Description")
+    p.attr("kms_key_id", "KmsKeyId")
+    p.block(
+        "replica",
+        "ReplicaRegions",
+        lambda r: r.attrs({"region": "Region", "kms_key_id": "KmsKeyId"}),
+    )
+    p.tags()
+    value = p.take("SecretString")
+    if value is not None:
+        b.add_resource(
+            "aws_secretsmanager_secret_version",
+            "_value",
+            [Attr("secret_id", b.self_ref("id")), Attr("secret_string", b.ctx.expr(value))],
+        )
+        b.ctx.note(
+            f"{b.logical_id}: the secret value ends up in the Terraform state; consider the "
+            "write-only secret_string_wo argument"
+        )
+    if p.has("GenerateSecretString"):
+        b.ctx.note(
+            f"{b.logical_id}: GenerateSecretString has no aws provider equivalent; generate the "
+            "value with an ephemeral random_password and secret_string_wo, or convert this "
+            "secret with the awscc provider"
+        )
+
+
+# --- SSM Parameter Store ----------------------------------------------------------------
+
+
+@resource(
+    "AWS::SSM::Parameter",
+    "aws_ssm_parameter",
+    ref="name",
+    attrs={"Type": "type", "Value": "value"},
+    import_id="Name",
+)
+def ssm_parameter(b: Builder) -> None:
+    p = b.props
+    b.name_attr("name", "Name")
+    p.attr("type", "Type")
+    p.attr("value", "Value")
+    p.attr("description", "Description")
+    p.attr("allowed_pattern", "AllowedPattern")
+    p.attr("tier", "Tier")
+    p.attr("data_type", "DataType")
+    p.tags()

@@ -6,6 +6,7 @@ Start with the [main README](../README.md) for the quick start. Everything else 
 
 - [API reference](reference/api.md): endpoints, request and response formats, errors, input limits
 - [Conversion rules](reference/conversion-rules.md): how each docker-compose field maps to Kubernetes
+- [CloudFormation to Terraform](reference/cloudformation-to-terraform.md): how CloudFormation, AWS SAM and AWS CDK templates become Terraform
 
 ## How it's built
 
