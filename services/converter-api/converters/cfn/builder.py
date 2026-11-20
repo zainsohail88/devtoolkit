@@ -52,6 +52,25 @@ class Props:
             return default
         return value
 
+    def literal(self, name: str, kind: type, value: Any = MISSING) -> Any:
+        """A property that must be a literal list or mapping (`kind`) for the converter to
+        look inside it. Taken from the properties unless `value` is given. When it is a
+        function (`!If`, `!Ref`...) instead, it is noted and kept as a comment, and None is
+        returned, so callers never mistake an intrinsic for data."""
+        if value is MISSING:
+            value = self.take(name)
+        if value is None or (
+            isinstance(value, kind)
+            and not (isinstance(value, dict) and intrinsic_name(value) is not None)
+        ):
+            return value
+        self.ctx.note(
+            f"{self.owner}: '{self.where}.{name}' is computed by a function and was not "
+            "converted; set it by hand"
+        )
+        self.comment(f"{name} was not converted: {snippet(value)}")
+        return None
+
     def drop(self, *names: str) -> None:
         """Properties that need no Terraform counterpart (the converter covers them)."""
         for name in names:
@@ -246,12 +265,16 @@ class Builder:
     def self_ref(self, attribute: str) -> Raw:
         return Raw(self.info.expression(attribute))
 
-    def count_items(self) -> list[Any]:
-        """`count = ...` for a resource that has a Condition."""
+    def count_items(self, when: str | None = None) -> list[Any]:
+        """`count = ...` for a resource that has a Condition, and/or that exists only `when`
+        an expression holds (an `!If [C, x, !Ref AWS::NoValue]` list item)."""
         condition = self.resource.get("Condition")
-        if not condition:
+        parts = [self.ctx.condition(condition)] if condition else []
+        if when:
+            parts.append(when if not parts else f"({when})")
+        if not parts:
             return []
-        return [hcl.Attr("count", Raw(f"{self.ctx.condition(condition)} ? 1 : 0")), hcl.BLANK]
+        return [hcl.Attr("count", Raw(f"{' && '.join(parts)} ? 1 : 0")), hcl.BLANK]
 
     def name_attr(self, tf_name: str, cfn_name: str, lowercase: bool = False) -> None:
         """A name Terraform requires but CloudFormation generates when it is left out.
@@ -260,7 +283,7 @@ class Builder:
             return
         self.ctx.stack_name_used = True
         suffix = self.logical_id.lower() if lowercase else self.logical_id
-        self.props.set(tf_name, Raw(f'"${{var.stack_name}}-{suffix}"'))
+        self.props.set(tf_name, Raw(f'"${{var.stack_name}}-{hcl.template_text(suffix)}"'))
         self.ctx.note(
             f"{self.logical_id} had no {cfn_name}, so CloudFormation generated one; Terraform "
             f"needs it, so it is now '<stack_name>-{suffix}' (to adopt the existing resource, "
@@ -280,17 +303,23 @@ class Builder:
     def add_data(self, kind: str, suffix: str, items: list[Any]) -> str:
         """A data source belonging to this resource (e.g. archive_file for Lambda code).
         Returns its address."""
-        name = self._extra_name(suffix)
+        name = self.ctx.names_for(f"data.{kind}").take(self._extra_name(suffix))
         self.extra.append(hcl.Block("data", [kind, name], self.count_items() + items))
         index = "[0]" if self.resource.get("Condition") else ""
         return f"data.{kind}.{name}{index}"
 
     def add_resource(
-        self, tf_type: str, suffix: str, items: list[Any], counted: bool = True
+        self,
+        tf_type: str,
+        suffix: str,
+        items: list[Any],
+        counted: bool = True,
+        when: str | None = None,
     ) -> str:
         """An extra resource next to the main one (e.g. aws_s3_bucket_versioning). Returns its
-        address. It shares the main resource's Condition unless counted=False."""
-        name = self._extra_name(suffix)
-        body = (self.count_items() if counted else []) + items
+        address. It shares the main resource's Condition unless counted=False; `when` adds a
+        condition of its own (see Context.optional_item)."""
+        name = self.ctx.names_for(tf_type).take(self._extra_name(suffix))
+        body = (self.count_items(when) if counted else []) + items
         self.extra.append(hcl.Block("resource", [tf_type, name], body))
         return f"{tf_type}.{name}"

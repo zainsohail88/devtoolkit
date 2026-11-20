@@ -4,36 +4,108 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 from converters.cfn import hcl
 from converters.cfn.builder import Builder, Props, snippet
-from converters.cfn.context import intrinsic_name, json_value
-from converters.cfn.hcl import Attr, Block, Raw
+from converters.cfn.context import (
+    Context,
+    Expression,
+    ResourceInfo,
+    _wrap,
+    intrinsic_name,
+    json_value,
+)
+from converters.cfn.hcl import Attr, Raw
 from converters.cfn.naming import UniqueNames, identifier
 from converters.cfn.resources import resource
 
 _PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
+_NO_VALUE = {"Ref": "AWS::NoValue"}
+
+
+def operand(value: Any) -> str:
+    """An HCL value as an operand of `==`: in parentheses unless it is a plain reference or
+    string (`a ? b : c == d` would compare c alone)."""
+    return _wrap(hcl.inline(value))
+
+
+def optional(value: Any) -> bool:
+    """Whether a list item is `!If [Cond, x, !Ref AWS::NoValue]` (either way round): an item
+    that only exists when a condition holds. Usable before conversion (no Context)."""
+    if not (isinstance(value, dict) and intrinsic_name(value) == "Fn::If"):
+        return False
+    args = value["Fn::If"]
+    return isinstance(args, list) and len(args) == 3 and (_NO_VALUE in args[1:])
+
+
+def main_index(values: list[Any]) -> int:
+    """Which of several targets gets the main resource: the first that is always there."""
+    return next((i for i, value in enumerate(values) if not optional(value)), 0)
+
+
+def only_when(b: Builder, when: str | None) -> None:
+    """The main resource exists only `when` (all its targets are optional). The framework
+    counts the main resource with `b.count_items()` once the converter returns, so that call
+    gets the condition too. Call it after every add_resource: those keep their own `when`."""
+    if not when:
+        return
+    count_items = b.count_items
+
+    def counted(extra: str | None = None) -> list[Any]:
+        return count_items(extra or when)
+
+    b.count_items = counted  # type: ignore[method-assign]
+
+
+def counted_refs(info: ResourceInfo) -> None:
+    """References to a main resource counted by only_when: `address[0].attribute`. (The
+    registration sets `conditional` from the Condition alone, after prepare hooks.)"""
+    for attribute in {info.ref, *info.attrs.values()}:
+        info.overrides[attribute] = f"{info.address}[0].{attribute}"
+
+
+def _prepare_targets(cfn_name: str) -> Callable[[ResourceInfo, dict[str, Any]], None]:
+    """References to a policy whose every target is optional need `[0]`."""
+
+    def prepare(info: ResourceInfo, resource: dict[str, Any]) -> None:
+        targets = (resource.get("Properties") or {}).get(cfn_name)
+        if isinstance(targets, list):
+            targets = [target for target in targets if target != _NO_VALUE]
+            if targets and optional(targets[main_index(targets)]):
+                counted_refs(info)
+
+    return prepare
 
 
 def _one_per_target(
     b: Builder, cfn_name: str, tf_type: str, argument: str, items: list[Any]
 ) -> None:
     """Resource policies that CloudFormation applies to a list of targets (queues, topics):
-    the first target is the main resource, each further one gets a copy."""
+    the first target that is always there is the main resource, each further one gets a
+    copy. `!If [Cond, x, !Ref AWS::NoValue]` targets get counted copies."""
     targets = b.props.peek(cfn_name)
+    if isinstance(targets, list):
+        targets = [target for target in targets if not b.ctx.is_no_value(target)]
     if not isinstance(targets, list) or not targets:
         # A computed list: finish() keeps it as a comment and reports it.
         b.props.items.extend(items)
         return
     b.props.drop(cfn_name)
-    b.props.items.insert(0, Attr(argument, b.ctx.expr(targets[0])))
-    b.props.items.extend(items)
+    main, main_when = main_index(targets), None
     suffixes = UniqueNames()
-    for index, target in enumerate(targets[1:], 2):
+    for index, item in enumerate(targets, 1):
+        when, target = b.ctx.optional_item(item)
+        if index - 1 == main:
+            b.props.items.insert(0, Attr(argument, b.ctx.expr(target)))
+            b.props.items.extend(items)
+            main_when = when
+            continue
         label = str(target["Ref"]) if isinstance(target, dict) and "Ref" in target else ""
         suffix = suffixes.take("_" + identifier(label or f"target_{index}", f"target_{index}"))
-        b.add_resource(tf_type, suffix, [Attr(argument, b.ctx.expr(target)), *items])
+        b.add_resource(tf_type, suffix, [Attr(argument, b.ctx.expr(target)), *items], when=when)
+    only_when(b, main_when)
 
 
 # --- SQS --------------------------------------------------------------------------------
@@ -65,7 +137,7 @@ def sqs_queue(b: Builder) -> None:
     p.tags()
 
 
-@resource("AWS::SQS::QueuePolicy", "aws_sqs_queue_policy")
+@resource("AWS::SQS::QueuePolicy", "aws_sqs_queue_policy", prepare=_prepare_targets("Queues"))
 def sqs_queue_policy(b: Builder) -> None:
     policy = json_value(b.ctx, b.props.take("PolicyDocument", {}))
     _one_per_target(b, "Queues", "aws_sqs_queue_policy", "queue_url", [Attr("policy", policy)])
@@ -103,14 +175,36 @@ def sns_topic(b: Builder) -> None:
         )
         p.comment(f"Subscription was not converted: {snippet(subscriptions)}")
         return
-    for index, subscription in enumerate(subscriptions, 1):
-        inner = Props(b.ctx, subscription, f"{b.logical_id}.Subscription[{index - 1}]", p.owner)
+    count = sum(not b.ctx.is_no_value(s) for s in subscriptions)
+    for index, item in enumerate(subscriptions, 1):
+        if b.ctx.is_no_value(item):
+            continue
+        where = f"{b.logical_id}.Subscription[{index - 1}]"
+        when, subscription = _list_item(p, item, where, "aws_sns_topic_subscription")
+        if subscription is None:
+            continue
+        inner = Props(b.ctx, subscription, where, p.owner)
         inner.items.append(Attr("topic_arn", b.self_ref("arn")))
         inner.attr("protocol", "Protocol")
         inner.attr("endpoint", "Endpoint")
         inner.finish()
-        suffix = "_subscription" if len(subscriptions) == 1 else f"_subscription_{index}"
-        b.add_resource("aws_sns_topic_subscription", suffix, inner.items)
+        suffix = "_subscription" if count == 1 else f"_subscription_{index}"
+        b.add_resource("aws_sns_topic_subscription", suffix, inner.items, when=when)
+
+
+def _list_item(p: Props, item: Any, where: str, tf_type: str) -> tuple[str | None, Any]:
+    """One entry of a list of structures that each become a resource: (condition, mapping).
+    `!If [Cond, {...}, !Ref AWS::NoValue]` gives a counted resource; any other function is
+    reported and kept as a comment, and the mapping is None."""
+    when, value = p.ctx.optional_item(item)
+    if isinstance(value, dict) and intrinsic_name(value) is None:
+        return when, value
+    p.ctx.note(
+        f"{p.owner}: '{where}' is computed by a function and was not converted; add the "
+        f"{tf_type} by hand"
+    )
+    p.comment(f"{where.split('.', 1)[-1]} was not converted: {snippet(item)}")
+    return None, None
 
 
 @resource("AWS::SNS::Subscription", "aws_sns_topic_subscription", ref="arn")
@@ -129,7 +223,7 @@ def sns_subscription(b: Builder) -> None:
     p.attr("region", "Region")
 
 
-@resource("AWS::SNS::TopicPolicy", "aws_sns_topic_policy")
+@resource("AWS::SNS::TopicPolicy", "aws_sns_topic_policy", prepare=_prepare_targets("Topics"))
 def sns_topic_policy(b: Builder) -> None:
     policy = json_value(b.ctx, b.props.take("PolicyDocument", {}))
     _one_per_target(b, "Topics", "aws_sns_topic_policy", "arn", [Attr("policy", policy)])
@@ -161,8 +255,14 @@ def events_rule(b: Builder) -> None:
         p.comment(f"Targets was not converted: {snippet(targets)}")
         return
     suffixes = UniqueNames()
-    for index, target in enumerate(targets, 1):
-        inner = Props(b.ctx, target, f"{b.logical_id}.Targets[{index - 1}]", p.owner)
+    for index, item in enumerate(targets, 1):
+        if b.ctx.is_no_value(item):
+            continue
+        where = f"{b.logical_id}.Targets[{index - 1}]"
+        when, target = _list_item(p, item, where, "aws_cloudwatch_event_target")
+        if target is None:
+            continue
+        inner = Props(b.ctx, target, where, p.owner)
         inner.items.append(Attr("rule", b.self_ref("name")))
         if bus is not None and not b.ctx.is_no_value(bus):
             # A rule on a custom bus needs its targets on the same bus.
@@ -174,7 +274,7 @@ def events_rule(b: Builder) -> None:
         inner.finish()
         label = target_id if isinstance(target_id, str) else f"target_{index}"
         suffix = suffixes.take("_" + identifier(label, f"target_{index}"))
-        b.add_resource("aws_cloudwatch_event_target", suffix, inner.items)
+        b.add_resource("aws_cloudwatch_event_target", suffix, inner.items, when=when)
 
 
 def _event_target(t: Props) -> None:
@@ -222,11 +322,11 @@ def _event_target(t: Props) -> None:
 def _batch_target(r: Props) -> None:
     r.attr("job_definition", "JobDefinition")
     r.attr("job_name", "JobName")
-    size = r.take("ArrayProperties")
-    if isinstance(size, dict) and "Size" in size:
+    size = r.literal("ArrayProperties", dict)
+    if size is not None and "Size" in size:
         r.set("array_size", r.ctx.expr(size["Size"]))
-    retry = r.take("RetryStrategy")
-    if isinstance(retry, dict) and "Attempts" in retry:
+    retry = r.literal("RetryStrategy", dict)
+    if retry is not None and "Attempts" in retry:
         r.set("job_attempts", r.ctx.expr(retry["Attempts"]))
 
 
@@ -239,16 +339,24 @@ def _ecs_target(r: Props) -> None:
     r.boolean("enable_ecs_managed_tags", "EnableECSManagedTags")
     r.boolean("enable_execute_command", "EnableExecuteCommand")
     r.attr("propagate_tags", "PropagateTags")
-    network = r.take("NetworkConfiguration")
-    vpc = network.get("AwsVpcConfiguration") if isinstance(network, dict) else None
-    if isinstance(vpc, dict):
-        items: list[Any] = [Attr("subnets", r.ctx.expr(vpc.get("Subnets", [])))]
-        if "SecurityGroups" in vpc:
-            items.append(Attr("security_groups", r.ctx.expr(vpc["SecurityGroups"])))
-        public = vpc.get("AssignPublicIp")
-        if isinstance(public, str):
-            items.append(Attr("assign_public_ip", public.upper() == "ENABLED"))
-        r.items.append(Block("network_configuration", [], items))
+    r.block("network_configuration", "NetworkConfiguration", _ecs_network)
+
+
+def _ecs_network(n: Props) -> None:
+    """NetworkConfiguration.AwsVpcConfiguration: flat in Terraform's network_configuration."""
+    vpc = n.literal("AwsVpcConfiguration", dict)
+    if vpc is None:
+        return
+    v = Props(n.ctx, vpc, f"{n.where}.AwsVpcConfiguration", n.owner)
+    v.list_attr("subnets", "Subnets")
+    v.list_attr("security_groups", "SecurityGroups")
+    public = v.take("AssignPublicIp")
+    if isinstance(public, str):
+        v.set("assign_public_ip", public.upper() == "ENABLED")
+    elif public is not None:
+        v.set("assign_public_ip", Raw(f'{operand(n.ctx.expr(public))} == "ENABLED"'))
+    v.finish()
+    n.items.extend(v.items)
 
 
 @resource(
@@ -315,16 +423,38 @@ def kinesis_stream(b: Builder) -> None:
 # --- Step Functions ---------------------------------------------------------------------
 
 
-def _substitute(value: Any, substitutions: dict[str, Any]) -> Any:
+def _as_text(value: Any, ctx: Context) -> Any:
+    """A substitution value as CloudFormation pastes it into the definition: as text."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    if _number_param(ctx, value):
+        return Expression(f"tostring({ctx.text(value)})")
+    return value
+
+
+def _number_param(ctx: Context, value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"Ref"}
+        and ctx.parameter_types.get(str(value["Ref"])) == "Number"
+    )
+
+
+def _substitute(value: Any, substitutions: dict[str, Any], ctx: Context) -> Any:
     """Strings of a state machine definition with `${Name}` placeholders as Fn::Sub, so the
-    substitution values (often references) become Terraform expressions."""
+    substitution values (often references) become Terraform expressions. CloudFormation
+    replaces text, so a string stays a string whatever the value's type."""
     if isinstance(value, dict):
-        return {k: _substitute(v, substitutions) for k, v in value.items()}
+        return {k: _substitute(v, substitutions, ctx) for k, v in value.items()}
     if isinstance(value, list):
-        return [_substitute(v, substitutions) for v in value]
+        return [_substitute(v, substitutions, ctx) for v in value]
     if isinstance(value, str) and _PLACEHOLDER.search(value):
         names = {m.strip() for m in _PLACEHOLDER.findall(value)}
-        known = {name: substitutions[name] for name in names if name in substitutions}
+        known = {
+            name: _as_text(substitutions[name], ctx) for name in names if name in substitutions
+        }
         # Placeholders that are not substitutions stay literal text.
         template = _PLACEHOLDER.sub(
             lambda m: m.group(0) if m.group(1).strip() in known else "${!" + m.group(1) + "}",
@@ -380,7 +510,7 @@ def _definition(b: Builder) -> None:
         p.set("definition", b.ctx.expr(text))
     if definition is not None:
         if isinstance(substitutions, dict):
-            definition = _substitute(definition, substitutions)
+            definition = _substitute(definition, substitutions, b.ctx)
             substitutions = None
         p.set("definition", hcl.Call("jsonencode", b.ctx.expr(definition)))
     if substitutions is not None:

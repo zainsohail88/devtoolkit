@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,9 @@ def test_fixture_converts_everything():
     assert "redeployment = sha1(aws_api_gateway_rest_api.spec_api.body)" in main
     assert 'resource "aws_api_gateway_stage" "spec_deployment_stage"' in main
     assert 'method_path = "orders/GET"' in main
+    assert 'method_path = "~1/GET"' in main
+    assert 'dynamic "request_parameter"' in main and 'dynamic "route_settings"' in main
+    assert main.count("count = local.debugging ? 1 : 0") == 3
     assert '"get_orders_integration_response_200"' in main
     assert 'name          = "spec-http"' in main
     outputs = next(f["content"] for f in result["files"] if f["path"] == "outputs.tf")
@@ -38,7 +42,7 @@ def test_fixture_converts_everything():
     [
         ("/*", "*", "*/*"),
         ("/~1pets~1{id}", "GET", "pets/{id}/GET"),
-        ("/", "POST", "*/POST"),
+        ("/", "POST", "~1/POST"),
         ({"Ref": "X"}, "GET", None),
     ],
 )
@@ -167,3 +171,235 @@ def test_http_api_defaults_route_parameters_and_stage_settings():
     assert main.count("required              = false") == 2
     assert 'name   = "${var.stack_name}-Stage"' in main
     assert 'name            = "${var.stack_name}-Auth"' in main
+
+
+# --- regression tests for the review findings -------------------------------------------
+
+NO = {"Ref": "AWS::NoValue"}
+API = {"Type": "AWS::ApiGateway::RestApi", "Properties": {"Name": "a"}}
+HTTP = {"Type": "AWS::ApiGatewayV2::Api", "Properties": {"Name": "h", "ProtocolType": "HTTP"}}
+EVIL = 'x" ${file("/etc/passwd")} y'
+
+
+def convert_with_condition(resources: dict) -> tuple[str, list[str]]:
+    template = {
+        "Parameters": {"Env": {"Type": "String"}, "List": {"Type": "String"}},
+        "Conditions": {"On": {"Fn::Equals": [{"Ref": "Env"}, "on"]}},
+        "Resources": resources,
+    }
+    result = convert_template(yaml.safe_dump(template), stack_name="demo")
+    main = next(f["content"] for f in result["files"] if f["path"] == "main.tf")
+    return main, result["notes"]
+
+
+def optional(value):
+    return {"Fn::If": ["On", value, NO]}
+
+
+def assert_no_injection(main: str) -> None:
+    code = "\n".join(line for line in main.splitlines() if not line.lstrip().startswith("#"))
+    assert 'file("' not in code
+    assert not re.search(r"(?<!\$)\$\{file", code)
+
+
+def test_root_resource_method_settings_apply_to_the_root_only():
+    main, _ = convert(
+        {
+            "Api": API,
+            "Stage": {
+                "Type": "AWS::ApiGateway::Stage",
+                "Properties": {
+                    "RestApiId": {"Ref": "Api"},
+                    "DeploymentId": "d",
+                    "StageName": "s",
+                    "MethodSettings": [{"ResourcePath": "/", "HttpMethod": "GET"}],
+                },
+            },
+        }
+    )
+    assert 'method_path = "~1/GET"' in main
+
+
+def test_conditional_and_computed_method_settings():
+    main, notes = convert_with_condition(
+        {
+            "Api": API,
+            "Stage": {
+                "Type": "AWS::ApiGateway::Stage",
+                "Properties": {
+                    "RestApiId": {"Ref": "Api"},
+                    "DeploymentId": "d",
+                    "StageName": "s",
+                    "MethodSettings": [
+                        optional({"ResourcePath": "/*", "HttpMethod": "*", "MetricsEnabled": True}),
+                        {"Fn::If": ["On", {"ResourcePath": "/*"}, {"ResourcePath": "/"}]},
+                    ],
+                },
+            },
+            "Whole": {
+                "Type": "AWS::ApiGateway::Stage",
+                "Properties": {
+                    "RestApiId": {"Ref": "Api"},
+                    "DeploymentId": "d",
+                    "StageName": "w",
+                    "MethodSettings": optional([{"ResourcePath": "/*", "HttpMethod": "*"}]),
+                },
+            },
+        }
+    )
+    assert "count = local.on ? 1 : 0" in main
+    assert "metrics_enabled = true" in main
+    assert main.count('resource "aws_api_gateway_method_settings"') == 1
+    assert main.count("# MethodSettings was not converted") == 2
+    assert len([n for n in notes if "is computed by a function" in n]) == 2
+
+
+def test_conditional_and_computed_method_responses_and_integration():
+    main, notes = convert_with_condition(
+        {
+            "Api": API,
+            "Get": {
+                "Type": "AWS::ApiGateway::Method",
+                "Properties": {
+                    "RestApiId": {"Ref": "Api"},
+                    "ResourceId": {"Fn::GetAtt": ["Api", "RootResourceId"]},
+                    "HttpMethod": "GET",
+                    "MethodResponses": [optional({"StatusCode": 500}), {"Ref": "List"}],
+                    "Integration": optional(
+                        {
+                            "Type": "MOCK",
+                            "IntegrationResponses": [
+                                optional({"StatusCode": 500}),
+                                {"StatusCode": 200},
+                                {"Ref": "List"},
+                            ],
+                        }
+                    ),
+                },
+            },
+            "Computed": {
+                "Type": "AWS::ApiGateway::Method",
+                "Properties": {
+                    "RestApiId": {"Ref": "Api"},
+                    "ResourceId": "r",
+                    "HttpMethod": "GET",
+                    "MethodResponses": {"Ref": "List"},
+                    "Integration": {"Fn::If": ["On", {"Type": "MOCK"}, {"Type": "HTTP"}]},
+                },
+            },
+        }
+    )
+    response = main.split('resource "aws_api_gateway_method_response" "get_response_500"')[1]
+    assert response.lstrip("{\n ").startswith("count = local.on ? 1 : 0")
+    integration = main.split('resource "aws_api_gateway_integration" "get_integration"')[1]
+    assert integration.lstrip("{\n ").startswith("count = local.on ? 1 : 0")
+    both = main.split('"get_integration_response_500"')[1]
+    assert both.lstrip("{\n ").startswith("count = local.on && local.on ? 1 : 0")
+    only = main.split('"get_integration_response_200"')[1]
+    assert only.lstrip("{\n ").startswith("count = local.on ? 1 : 0")
+    assert "aws_api_gateway_method_response.get_response_500," in main
+    assert "# MethodResponses was not converted" in main
+    assert "# Integration was not converted" in main
+    assert "# Integration.IntegrationResponses was not converted" in main
+    assert "computed_integration" not in main
+
+
+def test_conditional_and_computed_route_parameters_and_settings():
+    main, notes = convert_with_condition(
+        {
+            "Http": HTTP,
+            "Route": {
+                "Type": "AWS::ApiGatewayV2::Route",
+                "Properties": {
+                    "ApiId": {"Ref": "Http"},
+                    "RouteKey": "GET /",
+                    "RequestParameters": {
+                        "route.request.querystring.a": optional({"Required": True}),
+                        "route.request.querystring.b": {"Fn::If": ["On", {"Required": True}, {}]},
+                        "route.request.querystring.c": "true",
+                    },
+                },
+            },
+            "Whole": {
+                "Type": "AWS::ApiGatewayV2::Route",
+                "Properties": {
+                    "ApiId": {"Ref": "Http"},
+                    "RouteKey": "GET /w",
+                    "RequestParameters": optional({"route.request.querystring.a": {}}),
+                },
+            },
+            "Stage": {
+                "Type": "AWS::ApiGatewayV2::Stage",
+                "Properties": {
+                    "ApiId": {"Ref": "Http"},
+                    "StageName": "s",
+                    "RouteSettings": {
+                        "GET /": optional({"ThrottlingBurstLimit": 1}),
+                        "GET /x": {"Ref": "List"},
+                    },
+                },
+            },
+            "WholeStage": {
+                "Type": "AWS::ApiGatewayV2::Stage",
+                "Properties": {
+                    "ApiId": {"Ref": "Http"},
+                    "StageName": "w",
+                    "RouteSettings": optional({"GET /": {}}),
+                },
+            },
+        }
+    )
+    assert 'dynamic "request_parameter" {\n    for_each = local.on ? [1] : []' in main
+    assert '"route.request.querystring.c"\n    required              = true' in main
+    assert 'Fn::If"\n' not in main and 'request_parameter_key = "Fn::If"' not in main
+    assert "# RequestParameters.route.request.querystring.b was not converted" in main
+    assert "# RequestParameters was not converted" in main
+    assert 'dynamic "route_settings" {\n    for_each = local.on ? [1] : []' in main
+    assert "# RouteSettings.GET /x was not converted" in main
+    assert "# RouteSettings was not converted" in main
+    assert 'route_key = "Fn::If"' not in main
+
+
+def test_api_gateway_template_text_cannot_inject_hcl():
+    main, _ = convert(
+        {
+            "Api": {"Type": "AWS::ApiGateway::RestApi", "Properties": {"Name": EVIL}},
+            "Stage": {
+                "Type": "AWS::ApiGateway::Stage",
+                "Properties": {
+                    "RestApiId": {"Ref": "Api"},
+                    "DeploymentId": EVIL,
+                    "StageName": EVIL,
+                    "MethodSettings": [{"ResourcePath": EVIL, "HttpMethod": EVIL}],
+                },
+            },
+            "Get": {
+                "Type": "AWS::ApiGateway::Method",
+                "Properties": {
+                    "RestApiId": {"Ref": "Api"},
+                    "ResourceId": EVIL,
+                    "HttpMethod": EVIL,
+                    "MethodResponses": [{"StatusCode": EVIL}],
+                    "Integration": {"Type": EVIL, "IntegrationResponses": [{"StatusCode": EVIL}]},
+                },
+            },
+            "Http": {"Type": "AWS::ApiGatewayV2::Api", "Properties": {"Name": EVIL}},
+            "Route": {
+                "Type": "AWS::ApiGatewayV2::Route",
+                "Properties": {
+                    "ApiId": {"Ref": "Http"},
+                    "RouteKey": EVIL,
+                    "RequestParameters": {EVIL: {"Required": EVIL}},
+                },
+            },
+            "HttpStage": {
+                "Type": "AWS::ApiGatewayV2::Stage",
+                "Properties": {
+                    "ApiId": {"Ref": "Http"},
+                    "StageName": EVIL,
+                    "RouteSettings": {EVIL: {"LoggingLevel": EVIL}},
+                },
+            },
+        }
+    )
+    assert_no_injection(main)

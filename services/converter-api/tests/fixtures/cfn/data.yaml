@@ -52,12 +52,13 @@ Resources:
   DbParams:
     Type: AWS::RDS::DBParameterGroup
     Properties:
-      DBParameterGroupName: shop-postgres
+      DBParameterGroupName: Shop-Postgres
       Description: Postgres settings
       Family: postgres16
       Parameters:
         log_min_duration_statement: 500
         rds.force_ssl: "1"
+        log_connections: true
       Tags:
         - Key: app
           Value: shop
@@ -107,11 +108,12 @@ Resources:
       AllocatedStorage: 20
       MasterUsername: admin
       MasterUserPassword: !Ref DbPassword
+      ApplyImmediately: false
   Cluster:
     Type: AWS::RDS::DBCluster
     DeletionPolicy: Snapshot
     Properties:
-      DBClusterIdentifier: shop-cluster
+      DBClusterIdentifier: Shop-Cluster
       Engine: aurora-postgresql
       EngineVersion: "16.4"
       DatabaseName: shop
@@ -131,6 +133,15 @@ Resources:
       Tags:
         - Key: app
           Value: shop
+  ClusterWriter:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: Shop-Writer
+      DBClusterIdentifier: !Ref Cluster
+      Engine: aurora-postgresql
+      DBInstanceClass: db.serverless
+      PromotionTier: 0
+      EnablePerformanceInsights: true
   ApiKey:
     Type: AWS::SecretsManager::Secret
     Properties:

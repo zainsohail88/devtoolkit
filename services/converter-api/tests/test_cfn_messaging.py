@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from converters.cfn import convert_template
 
@@ -394,3 +395,191 @@ def test_log_destinations():
     assert main.count(':log-group:g:*"') == 2
     assert 'log_destination = "${var.log_arn}:*"' in main
     assert 'type = "AWS_OWNED_KEY"' in main
+
+
+def squash(text: str) -> str:
+    """HCL without the alignment spaces before '='."""
+    return re.sub(r" +=", " =", text)
+
+
+ON = {"On": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}}
+ENV = {"Env": {"Type": "String"}}
+NO = {"Ref": "AWS::NoValue"}
+
+
+def _if(value: object) -> dict:
+    return {"Fn::If": ["On", value, NO]}
+
+
+def _block(main: str, header: str) -> str:
+    return main.split(header + " {")[1].split("\n}")[0]
+
+
+def test_policies_for_optional_queues_and_topics_are_counted():
+    main, notes = convert(
+        {
+            "A": {"Type": "AWS::SQS::Queue"},
+            "B": {"Type": "AWS::SQS::Queue"},
+            "T": {"Type": "AWS::SNS::Topic"},
+            "QP": {
+                "Type": "AWS::SQS::QueuePolicy",
+                "Properties": {
+                    "PolicyDocument": DOC,
+                    "Queues": [_if({"Ref": "B"}), {"Ref": "A"}, NO],
+                },
+            },
+            "TP": {
+                "Type": "AWS::SNS::TopicPolicy",
+                "Properties": {"PolicyDocument": DOC, "Topics": [_if({"Ref": "T"})]},
+            },
+        },
+        Parameters=ENV,
+        Conditions=ON,
+        Outputs={"Id": {"Value": {"Ref": "TP"}}},
+    )
+    main = squash(main)
+    main_policy = _block(main, 'resource "aws_sqs_queue_policy" "qp"')
+    assert "count" not in main_policy and "queue_url = aws_sqs_queue.a.url" in main_policy
+    copy = _block(main, 'resource "aws_sqs_queue_policy" "qp_b"')
+    assert "count = local.on ? 1 : 0" in copy and "queue_url = aws_sqs_queue.b.url" in copy
+    topic = _block(main, 'resource "aws_sns_topic_policy" "tp"')
+    assert "count = local.on ? 1 : 0" in topic and "arn = aws_sns_topic.t.arn" in topic
+    assert "aws_sns_topic_policy.tp[0].id" in main
+    assert "null" not in main
+    assert notes == []
+
+
+def test_optional_subscriptions_and_rule_targets_are_counted():
+    main, notes = convert(
+        {
+            "Q": {"Type": "AWS::SQS::Queue"},
+            "Topic": {
+                "Type": "AWS::SNS::Topic",
+                "Properties": {
+                    "Subscription": [
+                        _if({"Protocol": "email", "Endpoint": "ops@example.com"}),
+                        NO,
+                        {"Fn::If": ["On", {"Protocol": "sqs"}, {"Protocol": "email"}]},
+                    ]
+                },
+            },
+            "Rule": {
+                "Type": "AWS::Events::Rule",
+                "Properties": {
+                    "ScheduleExpression": "rate(5 minutes)",
+                    "Targets": [
+                        _if({"Id": "q", "Arn": {"Fn::GetAtt": ["Q", "Arn"]}}),
+                        NO,
+                        {"Ref": "Targets"},
+                    ],
+                },
+            },
+        },
+        Parameters={**ENV, "Targets": {"Type": "String"}},
+        Conditions=ON,
+    )
+    main = squash(main)
+    subscription = _block(main, 'resource "aws_sns_topic_subscription" "topic_subscription_1"')
+    assert "count = local.on ? 1 : 0" in subscription
+    assert (
+        'protocol = "email"' in subscription
+        and "topic_arn = aws_sns_topic.topic.arn" in subscription
+    )
+    target = _block(main, 'resource "aws_cloudwatch_event_target" "rule_q"')
+    assert "count = local.on ? 1 : 0" in target and "arn = aws_sqs_queue.q.arn" in target
+    assert main.count('resource "aws_sns_topic_subscription"') == 1
+    assert main.count('resource "aws_cloudwatch_event_target"') == 1
+    assert "Subscription[2] was not converted" in main
+    assert "Targets[2] was not converted" in main
+    assert any("'Topic.Subscription[2]' is computed by a function" in n for n in notes)
+    assert any("'Rule.Targets[2]' is computed by a function" in n for n in notes)
+
+
+def test_ecs_target_network_configuration_from_functions():
+    def rule(network: object) -> dict:
+        return {
+            "Type": "AWS::Events::Rule",
+            "Properties": {
+                "ScheduleExpression": "rate(1 hour)",
+                "Targets": [
+                    {
+                        "Id": "t",
+                        "Arn": "arn:aws:ecs:us-east-1:123456789012:cluster/c",
+                        "RoleArn": ROLE,
+                        "EcsParameters": {
+                            "TaskDefinitionArn": "arn:task-definition/t:1",
+                            "NetworkConfiguration": network,
+                            "ArrayProperties": {"Ref": "Size"},
+                        },
+                    }
+                ],
+            },
+        }
+
+    main, notes = convert(
+        {
+            "Public": rule(
+                {
+                    "AwsVpcConfiguration": {
+                        "Subnets": ["subnet-1"],
+                        "AssignPublicIp": {"Fn::If": ["On", "ENABLED", "DISABLED"]},
+                    }
+                }
+            ),
+            "Computed": rule({"Ref": "Network"}),
+            "Inner": rule({"AwsVpcConfiguration": {"Ref": "Network"}}),
+        },
+        Parameters={**ENV, "Network": {"Type": "String"}, "Size": {"Type": "String"}},
+        Conditions=ON,
+    )
+    main = squash(main)
+    assert 'assign_public_ip = (local.on ? "ENABLED" : "DISABLED") == "ENABLED"' in main
+    assert "NetworkConfiguration was not converted" in main
+    assert "AwsVpcConfiguration was not converted" in main
+    assert "ArrayProperties was not converted" in main
+    assert any("Computed.Targets[0].EcsParameters.NetworkConfiguration" in n for n in notes)
+    assert any("Inner.Targets[0].EcsParameters.NetworkConfiguration.AwsVpc" in n for n in notes)
+
+
+def test_definition_substitutions_stay_text():
+    main, _ = convert(
+        {
+            "Machine": {
+                "Type": "AWS::StepFunctions::StateMachine",
+                "Properties": {
+                    "RoleArn": ROLE,
+                    "DefinitionString": json.dumps(
+                        {
+                            "StartAt": "A",
+                            "States": {
+                                "A": {
+                                    "Type": "Pass",
+                                    "Result": {
+                                        "n": "${N}",
+                                        "f": "${F}",
+                                        "b": "${B}",
+                                        "p": "${P}",
+                                        "s": "${S}",
+                                        "mixed": "n=${N}",
+                                    },
+                                    "End": True,
+                                }
+                            },
+                        }
+                    ),
+                    "DefinitionSubstitutions": {
+                        "N": 5,
+                        "F": 1.5,
+                        "B": True,
+                        "P": {"Ref": "Retries"},
+                        "S": {"Ref": "Name"},
+                    },
+                },
+            }
+        },
+        Parameters={"Retries": {"Type": "Number"}, "Name": {"Type": "String"}},
+    )
+    main = squash(main)
+    for line in ('n = "5"', 'f = "1.5"', 'b = "true"', "p = tostring(var.retries)", "s = var.name"):
+        assert line in main
+    assert 'mixed = "n=5"' in main

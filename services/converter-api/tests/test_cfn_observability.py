@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 
 from converters.cfn import convert_template
+
+NO = {"Ref": "AWS::NoValue"}
 
 
 def convert(resources: dict, **sections: object) -> tuple[str, list[str]]:
@@ -149,3 +152,60 @@ def test_dashboard_body_forms():
     assert 'dashboard_body = "{\\"widgets\\":[]}"' in main
     assert "aws_cloudwatch_dashboard.text.dashboard_name" in main
     assert notes == []
+
+
+def test_alarm_actions_drop_novalue_items():
+    main, notes = convert(
+        {
+            "Alarm": {
+                "Type": "AWS::CloudWatch::Alarm",
+                "Properties": {
+                    "AlarmName": "a",
+                    "ComparisonOperator": "GreaterThanThreshold",
+                    "EvaluationPeriods": 1,
+                    "Threshold": 1,
+                    "MetricName": "Errors",
+                    "Namespace": "App",
+                    "Period": 60,
+                    "Statistic": "Sum",
+                    "AlarmActions": [
+                        {"Fn::If": ["On", "arn:aws:sns:us-east-1:123456789012:t", NO]},
+                        "arn:aws:sns:us-east-1:123456789012:u",
+                    ],
+                    "OKActions": [NO],
+                },
+            }
+        },
+        Parameters={"Env": {"Type": "String"}},
+        Conditions={"On": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}},
+    )
+    assert (
+        'alarm_actions = [for item in [local.on ? "arn:aws:sns:us-east-1:123456789012:t" : null,'
+        ' "arn:aws:sns:us-east-1:123456789012:u"] : item if item != null]'
+    ) in re.sub(r" +=", " =", main)
+    assert "ok_actions" in main and "[null]" not in main
+
+
+def test_alarm_metric_stat_from_a_function_is_reported():
+    main, notes = convert(
+        {
+            "Alarm": {
+                "Type": "AWS::CloudWatch::Alarm",
+                "Properties": {
+                    "AlarmName": "a",
+                    "ComparisonOperator": "GreaterThanThreshold",
+                    "EvaluationPeriods": 1,
+                    "Threshold": 1,
+                    "Metrics": [
+                        {"Id": "m1", "MetricStat": {"Ref": "Stat"}},
+                        {"Id": "m2", "MetricStat": {"Metric": {"Ref": "Metric"}, "Stat": "Sum"}},
+                    ],
+                },
+            }
+        },
+        Parameters={"Stat": {"Type": "String"}, "Metric": {"Type": "String"}},
+    )
+    assert "MetricStat was not converted" in main
+    assert "Metric was not converted" in main
+    assert any("Alarm.Metrics[0].MetricStat' is computed" in n for n in notes)
+    assert any("Alarm.Metrics[1].MetricStat.Metric' is computed" in n for n in notes)

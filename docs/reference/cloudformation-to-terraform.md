@@ -14,6 +14,8 @@ The rule is the same as for the other converters: anything that can't be convert
 
 For CDK, run `cdk synth` and send `cdk.out/<Stack>.template.json`. DevToolkit never runs your code.
 
+Logical IDs and parameter, condition, mapping and output names must be letters and digits, as CloudFormation requires; anything else is rejected, which also keeps every name safe to use in Terraform. `!Cidr` makes at most 256 blocks, as in CloudFormation.
+
 YAML short forms (`!Ref`, `!GetAtt A.B`, `!Sub`, `!If`...) are read as their long forms. Scalars are read the way CloudFormation reads them: `2010-09-09` stays a string and `0755` stays `"0755"`.
 
 ## Output files
@@ -82,6 +84,13 @@ A parameter whose name Terraform reserves (`count`, `version`, `source`...) gets
 | Policy documents, event patterns, state machine definitions | `jsonencode({...})` with the original keys |
 
 A reference to a resource that couldn't be converted becomes a placeholder variable describing what it stands for, so the configuration still validates.
+
+`AWS::NoValue` is removed the way CloudFormation removes it: from a list (`[for item in [...] : item if item != null]`), from a mapping (`merge({...}, cond ? {key = value} : {})`) and from a `!Join`. A list item such as a policy ARN, a queue or a security group rule written as `!If [Cond, x, !Ref AWS::NoValue]` becomes a resource with `count = local.cond ? 1 : 0`. Inside JSON documents, an `!If` whose branches have different shapes (a string or a list) is encoded per branch.
+
+### Known limitations
+
+- An `!If` that picks between two whole lists of nested blocks (for example two different `BlockDeviceMappings` lists) is kept as a comment and reported, not converted.
+- In ECS container definitions, a `!Ref` to a `Number` parameter used as an environment value stays a number; ECS expects a string there.
 
 ## Resource attributes
 

@@ -50,13 +50,28 @@ const hcl = StreamLanguage.define({
     }
     if (state.inString) {
       if (state.depth > 0) {
+        // Inside ${...}: code, which can hold its own strings and braces.
+        if (stream.peek() === '"') {
+          stream.next();
+          while (!stream.eol()) {
+            const next = stream.next();
+            if (next === "\\") stream.next();
+            else if (next === '"') break;
+          }
+          return "string";
+        }
+        if (stream.match("{")) {
+          state.depth += 1;
+          return "punctuation";
+        }
         if (stream.match("}")) {
           state.depth -= 1;
-          return "meta";
+          return state.depth === 0 ? "meta" : "punctuation";
         }
       } else {
+        if (stream.match("$${") || stream.match("%%{")) return "string"; // escaped, literal
         if (stream.match("${") || stream.match("%{")) {
-          state.depth += 1;
+          state.depth = 1;
           return "meta";
         }
         while (!stream.eol()) {
@@ -66,7 +81,9 @@ const hcl = StreamLanguage.define({
             state.inString = false;
             return "string";
           }
-          if ((next === "$" || next === "%") && stream.string.charAt(stream.pos + 1) === "{") break;
+          const after = stream.string.charAt(stream.pos + 1);
+          const opens = after === "{" || (after === next && stream.string.charAt(stream.pos + 2) === "{");
+          if ((next === "$" || next === "%") && opens) break;
           if (next === "\\") stream.next();
           stream.next();
         }

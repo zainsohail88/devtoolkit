@@ -9,6 +9,7 @@ from converters.cfn import hcl
 from converters.cfn.builder import Builder, Props
 from converters.cfn.hcl import Attr, Block, Raw
 from converters.cfn.resources import resource
+from converters.cfn.resources.compute import both, optional_block
 
 
 def _body_title(b: Builder) -> str | None:
@@ -171,20 +172,26 @@ def rest_stage(b: Builder) -> None:
         lambda a: a.attrs({"destination_arn": "DestinationArn", "format": "Format"}),
     )
     p.tags()
-    for index, setting in enumerate(p.take("MethodSettings") or [], start=1):
-        _method_settings(b, rest_api_id, setting, index)
+    for index, item in enumerate(p.literal("MethodSettings", list) or [], start=1):
+        when, setting = b.ctx.optional_item(item)
+        setting = p.literal("MethodSettings", dict, value=setting)
+        if setting is not None:
+            _method_settings(b, rest_api_id, setting, index, when)
 
 
 def _method_path(resource_path: Any, http_method: Any) -> Any:
     """CloudFormation's ResourcePath ('/~1pets', '/*') and HttpMethod as Terraform's
-    method_path ('pets/GET', '*/*')."""
+    method_path ('pets/GET', '*/*'). The root resource ('/') is '~1', as API Gateway encodes
+    it in method setting paths."""
     if not (isinstance(resource_path, str) and isinstance(http_method, str)):
         return None
-    path = resource_path.replace("~1", "/").lstrip("/") or "*"
+    path = resource_path.replace("~1", "/").lstrip("/") or "~1"
     return f"{path}/{http_method}"
 
 
-def _method_settings(b: Builder, rest_api_id: Any, setting: Any, index: int) -> None:
+def _method_settings(
+    b: Builder, rest_api_id: Any, setting: Any, index: int, when: str | None
+) -> None:
     inner = Props(b.ctx, setting, f"{b.logical_id}.MethodSettings[{index - 1}]", b.props.owner)
     path = _method_path(inner.take("ResourcePath", "/*"), inner.take("HttpMethod", "*"))
     if path is None:
@@ -211,6 +218,7 @@ def _method_settings(b: Builder, rest_api_id: Any, setting: Any, index: int) -> 
             Attr("method_path", path),
             Block("settings", [], inner.items),
         ],
+        when=when,
     )
 
 
@@ -249,7 +257,11 @@ def rest_method(b: Builder) -> None:
         Attr("http_method", b.self_ref("http_method")),
     ]
     responses: dict[str, str] = {}
-    for index, response in enumerate(p.take("MethodResponses") or []):
+    for index, item in enumerate(p.literal("MethodResponses", list) or []):
+        when, response = b.ctx.optional_item(item)
+        response = p.literal("MethodResponses", dict, value=response)
+        if response is None:
+            continue
         inner = Props(b.ctx, response, f"{b.logical_id}.MethodResponses[{index}]", p.owner)
         status = inner.peek("StatusCode")
         inner.attr("status_code", "StatusCode", lambda v: _text(b, v))
@@ -261,9 +273,11 @@ def rest_method(b: Builder) -> None:
             "aws_api_gateway_method_response",
             f"_response{_suffix(status, index)}",
             [*shared, *inner.items],
+            when=when,
         )
 
-    integration = p.take("Integration")
+    integration_when, integration = b.ctx.optional_item(p.take("Integration"))
+    integration = p.literal("Integration", dict, value=integration)
     if integration is None:
         return
     inner = Props(b.ctx, integration, f"{b.logical_id}.Integration", p.owner)
@@ -284,12 +298,19 @@ def rest_method(b: Builder) -> None:
     )
     inner.number("timeout_milliseconds", "TimeoutInMillis")
     inner.list_attr("cache_key_parameters", "CacheKeyParameters")
-    integration_responses = inner.take("IntegrationResponses") or []
+    integration_responses = inner.literal("IntegrationResponses", list) or []
     inner.finish()
     integration_address = b.add_resource(
-        "aws_api_gateway_integration", "_integration", [*shared, *inner.items]
+        "aws_api_gateway_integration",
+        "_integration",
+        [*shared, *inner.items],
+        when=integration_when,
     )
-    for index, response in enumerate(integration_responses):
+    for index, entry in enumerate(integration_responses):
+        when, response = b.ctx.optional_item(entry)
+        response = p.literal("Integration.IntegrationResponses", dict, value=response)
+        if response is None:
+            continue
         item = Props(
             b.ctx, response, f"{b.logical_id}.Integration.IntegrationResponses[{index}]", p.owner
         )
@@ -312,6 +333,7 @@ def rest_method(b: Builder) -> None:
             "aws_api_gateway_integration_response",
             f"_integration_response{_suffix(status, index)}",
             [*shared, *item.items, hcl.BLANK, Attr("depends_on", depends)],
+            when=both(integration_when, when),
         )
 
 
@@ -408,20 +430,23 @@ def http_route(b: Builder) -> None:
     )
     p.boolean("api_key_required", "ApiKeyRequired")
     p.list_attr("authorization_scopes", "AuthorizationScopes")
-    parameters = p.take("RequestParameters")
-    if isinstance(parameters, dict):
-        for key, value in parameters.items():
-            required = value.get("Required", False) if isinstance(value, dict) else value
-            p.items.append(
-                Block(
-                    "request_parameter",
-                    [],
-                    [
-                        Attr("request_parameter_key", str(key)),
-                        Attr("required", _bool(b.ctx.expr(required))),
-                    ],
-                )
+    for key, entry in (p.literal("RequestParameters", dict) or {}).items():
+        when, value = b.ctx.optional_item(entry)
+        if isinstance(value, dict):
+            value = p.literal(f"RequestParameters.{key}", dict, value=value)
+            if value is None:
+                continue
+            value = value.get("Required", False)
+        p.items.append(
+            optional_block(
+                "request_parameter",
+                [
+                    Attr("request_parameter_key", str(key)),
+                    Attr("required", _bool(b.ctx.expr(value))),
+                ],
+                when,
             )
+        )
 
 
 def _bool(value: Any) -> Any:
@@ -458,14 +483,16 @@ def http_stage(b: Builder) -> None:
         lambda a: a.attrs({"destination_arn": "DestinationArn", "format": "Format"}),
     )
     p.block("default_route_settings", "DefaultRouteSettings", _route_settings)
-    routes = p.take("RouteSettings")
-    if isinstance(routes, dict):
-        for route_key, settings in routes.items():
-            inner = Props(b.ctx, settings, f"{b.logical_id}.RouteSettings.{route_key}", p.owner)
-            inner.set("route_key", str(route_key))
-            _route_settings(inner)
-            inner.finish()
-            p.items.append(Block("route_settings", [], inner.items))
+    for route_key, entry in (p.literal("RouteSettings", dict) or {}).items():
+        when, settings = b.ctx.optional_item(entry)
+        settings = p.literal(f"RouteSettings.{route_key}", dict, value=settings)
+        if settings is None:
+            continue
+        inner = Props(b.ctx, settings, f"{b.logical_id}.RouteSettings.{route_key}", p.owner)
+        inner.set("route_key", str(route_key))
+        _route_settings(inner)
+        inner.finish()
+        p.items.append(optional_block("route_settings", inner.items, when))
     p.tags()
 
 

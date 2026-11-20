@@ -2,13 +2,39 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from converters.cfn import hcl
 from converters.cfn.builder import Builder, Props
-from converters.cfn.context import intrinsic_name
-from converters.cfn.hcl import Attr, Block
+from converters.cfn.context import ResourceInfo, intrinsic_name
+from converters.cfn.hcl import Attr, Block, Raw
 from converters.cfn.naming import identifier
 from converters.cfn.resources import resource
 
 # --- RDS --------------------------------------------------------------------------------
+
+
+def _lowercase(b: Builder, tf_name: str, cfn_name: str) -> None:
+    """A name RDS stores in lowercase. CloudFormation lowercases it; the provider rejects
+    uppercase letters, so a literal is lowercased and an expression goes through lower().
+    References to resources of the template are already lowercase."""
+    value = b.props.take(cfn_name)
+    if value is None:
+        return
+    if isinstance(value, str):
+        b.props.set(tf_name, value.lower())
+        return
+    if isinstance(value, dict) and ("Fn::GetAtt" in value or value.get("Ref") in b.ctx.resources):
+        b.props.set(tf_name, b.ctx.expr(value))
+        return
+    b.props.set(tf_name, Raw(f"lower({hcl.inline(b.ctx.expr(value))})"))
+
+
+def _apply_immediately(b: Builder) -> None:
+    """CloudFormation applies DB instance changes at once (ApplyImmediately defaults to
+    true); Terraform waits for the maintenance window unless told otherwise."""
+    if not b.props.boolean("apply_immediately", "ApplyImmediately"):
+        b.props.set("apply_immediately", True)
 
 
 def _final_snapshot(b: Builder, identifier_prop: str) -> list[Attr]:
@@ -18,7 +44,7 @@ def _final_snapshot(b: Builder, identifier_prop: str) -> list[Attr]:
     if b.resource.get("DeletionPolicy") == "Delete":
         return [Attr("skip_final_snapshot", True)]
     name = b.props.peek(identifier_prop)
-    base = name if isinstance(name, str) else identifier(b.logical_id).replace("_", "-")
+    base = name.lower() if isinstance(name, str) else identifier(b.logical_id).replace("_", "-")
     if b.resource.get("DeletionPolicy") is None:
         b.ctx.note(
             f"{b.logical_id}: CloudFormation snapshots this database on delete by default; "
@@ -45,6 +71,20 @@ def _master_secret(b: Builder) -> None:
         b.props.set("master_user_secret_kms_key_id", b.ctx.expr(secret["KmsKeyId"]))
 
 
+def _prepare_instance(info: ResourceInfo, resource_: dict[str, Any]) -> None:
+    """A DB instance of an Aurora (or Multi-AZ) cluster is an aws_rds_cluster_instance."""
+    if (resource_.get("Properties") or {}).get("DBClusterIdentifier") is not None:
+        info.tf_type = "aws_rds_cluster_instance"
+        info.attrs.update(
+            {
+                "Endpoint.Address": "endpoint",
+                "DbiResourceId": "dbi_resource_id",
+            }
+        )
+        info.attrs.pop("Endpoint.HostedZoneId")
+        info.attrs.pop("MasterUserSecret.SecretArn")
+
+
 @resource(
     "AWS::RDS::DBInstance",
     "aws_db_instance",
@@ -58,13 +98,17 @@ def _master_secret(b: Builder) -> None:
         "MasterUserSecret.SecretArn": "master_user_secret[0].secret_arn",
     },
     import_id="DBInstanceIdentifier",
+    prepare=_prepare_instance,
 )
 def db_instance(b: Builder) -> None:
+    if b.info.tf_type == "aws_rds_cluster_instance":
+        _cluster_instance(b)
+        return
     p = b.props
     snapshot = _final_snapshot(b, "DBInstanceIdentifier")
+    _lowercase(b, "identifier", "DBInstanceIdentifier")
     p.attrs(
         {
-            "identifier": "DBInstanceIdentifier",
             "engine": "Engine",
             "engine_version": "EngineVersion",
             "instance_class": "DBInstanceClass",
@@ -118,7 +162,46 @@ def db_instance(b: Builder) -> None:
     _master_secret(b)
     p.list_attr("vpc_security_group_ids", "VPCSecurityGroups")
     p.list_attr("enabled_cloudwatch_logs_exports", "EnableCloudwatchLogsExports")
+    _apply_immediately(b)
     p.items.extend(snapshot)
+    p.tags()
+
+
+def _cluster_instance(b: Builder) -> None:
+    """A cluster member. CloudFormation takes no snapshot of it on delete (the cluster holds
+    the data), so there are no final snapshot settings."""
+    p = b.props
+    _lowercase(b, "identifier", "DBInstanceIdentifier")
+    p.attrs(
+        {
+            "cluster_identifier": "DBClusterIdentifier",
+            "engine": "Engine",
+            "engine_version": "EngineVersion",
+            "instance_class": "DBInstanceClass",
+            "db_subnet_group_name": "DBSubnetGroupName",
+            "db_parameter_group_name": "DBParameterGroupName",
+            "availability_zone": "AvailabilityZone",
+            "ca_cert_identifier": "CACertificateIdentifier",
+            "monitoring_role_arn": "MonitoringRoleArn",
+            "performance_insights_kms_key_id": "PerformanceInsightsKMSKeyId",
+            "preferred_backup_window": "PreferredBackupWindow",
+            "preferred_maintenance_window": "PreferredMaintenanceWindow",
+        }
+    )
+    for tf_name, cfn_name in (
+        ("monitoring_interval", "MonitoringInterval"),
+        ("performance_insights_retention_period", "PerformanceInsightsRetentionPeriod"),
+        ("promotion_tier", "PromotionTier"),
+    ):
+        p.number(tf_name, cfn_name)
+    for tf_name, cfn_name in (
+        ("publicly_accessible", "PubliclyAccessible"),
+        ("auto_minor_version_upgrade", "AutoMinorVersionUpgrade"),
+        ("copy_tags_to_snapshot", "CopyTagsToSnapshot"),
+        ("performance_insights_enabled", "EnablePerformanceInsights"),
+    ):
+        p.boolean(tf_name, cfn_name)
+    _apply_immediately(b)
     p.tags()
 
 
@@ -127,7 +210,7 @@ def db_instance(b: Builder) -> None:
 )
 def db_subnet_group(b: Builder) -> None:
     p = b.props
-    p.attr("name", "DBSubnetGroupName")
+    _lowercase(b, "name", "DBSubnetGroupName")
     p.attr("description", "DBSubnetGroupDescription")
     p.list_attr("subnet_ids", "SubnetIds")
     p.tags()
@@ -141,27 +224,33 @@ def db_subnet_group(b: Builder) -> None:
 )
 def db_parameter_group(b: Builder) -> None:
     p = b.props
-    p.attr("name", "DBParameterGroupName")
+    _lowercase(b, "name", "DBParameterGroupName")
     p.attr("description", "Description")
     p.attr("family", "Family")
     parameters = p.peek("Parameters")
     if isinstance(parameters, dict) and intrinsic_name(parameters) is None:
         p.drop("Parameters")
         for name, value in parameters.items():
-            p.items.append(
-                Block(
-                    "parameter",
-                    [],
-                    [
-                        Attr("name", str(name)),
-                        Attr("value", b.ctx.expr(value) if isinstance(value, dict) else str(value)),
-                        # Static parameters only apply after a reboot, which is also what
-                        # CloudFormation does; "immediate" would fail for them.
-                        Attr("apply_method", "pending-reboot"),
-                    ],
-                )
+            # No apply_method: like CloudFormation, the provider applies each parameter the
+            # default way, immediately ("pending-reboot" would hold dynamic ones back).
+            items = [Attr("name", str(name)), Attr("value", _parameter_value(b, value))]
+            p.items.append(Block("parameter", [], items))
+        if parameters:
+            b.ctx.note(
+                f"{b.logical_id}: the provider applies parameters immediately; a static "
+                'parameter fails that way and needs apply_method = "pending-reboot" (it '
+                "takes effect at the next reboot, as with CloudFormation)"
             )
     p.tags()
+
+
+def _parameter_value(b: Builder, value: Any) -> Any:
+    """Parameter values are text; CloudFormation writes booleans as "true" and "false"."""
+    if isinstance(value, dict):
+        return b.ctx.expr(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def _scaling_v2(s: Props) -> None:
@@ -187,9 +276,9 @@ def _scaling_v2(s: Props) -> None:
 def db_cluster(b: Builder) -> None:
     p = b.props
     snapshot = _final_snapshot(b, "DBClusterIdentifier")
+    _lowercase(b, "cluster_identifier", "DBClusterIdentifier")
     p.attrs(
         {
-            "cluster_identifier": "DBClusterIdentifier",
             "engine": "Engine",
             "engine_version": "EngineVersion",
             "engine_mode": "EngineMode",

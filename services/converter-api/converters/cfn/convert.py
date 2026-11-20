@@ -88,6 +88,7 @@ class Converter:
         self.outputs: list[hcl.Block] = []
         self.imports: list[hcl.Block] = []
         self.sensitive: set[str] = set()
+        self.sensitive_locals: set[str] = set()
         self.report: list[dict[str, Any]] = []
         self.uses_archive = False
 
@@ -207,8 +208,20 @@ class Converter:
         conditions = self.template.get("Conditions") or {}
         for name in conditions:
             self.ctx.conditions[str(name)] = self.ctx.local_names.take(identifier(name))
+        rendered: dict[str, str] = {}
         for name, condition in conditions.items():
-            self.locals.append(hcl.Attr(self.ctx.conditions[str(name)], self.ctx.expr(condition)))
+            value = self.ctx.expr(condition)
+            rendered[self.ctx.conditions[str(name)]] = hcl.render(value)
+            self.locals.append(hcl.Attr(self.ctx.conditions[str(name)], value))
+        # A condition built from a NoEcho parameter is sensitive too, and so is anything
+        # (an output with that Condition) that uses it.
+        changed = True
+        while changed:
+            changed = False
+            for local, text in rendered.items():
+                if local not in self.sensitive_locals and self._uses_sensitive(text):
+                    self.sensitive_locals.add(local)
+                    changed = True
 
     # --- resources --------------------------------------------------------------------
 
@@ -237,7 +250,10 @@ class Converter:
                 info = ResourceInfo(logical_id, cfn_type, tf_type, names.take(wanted), kind="awscc")
             else:
                 info = ResourceInfo(logical_id, cfn_type, "", wanted, kind="unsupported")
-            info.conditional = bool(resource.get("Condition"))
+            # A prepare hook may have made the resource counted for its own reasons.
+            info.conditional = info.conditional or bool(resource.get("Condition"))
+            if info.tf_type:
+                self.ctx.names_for(info.tf_type).reserve(info.name)
             self.ctx.resources[logical_id] = info
 
     def convert_resources(self) -> None:
@@ -371,6 +387,11 @@ class Converter:
         ]
         self.imports.append(hcl.Block("import", [], body))
 
+    def _uses_sensitive(self, text: str) -> bool:
+        return any(re.search(rf"\bvar\.{name}\b", text) for name in self.sensitive) or any(
+            re.search(rf"\blocal\.{name}\b", text) for name in self.sensitive_locals
+        )
+
     # --- outputs ----------------------------------------------------------------------
 
     def convert_outputs(self) -> None:
@@ -384,8 +405,7 @@ class Converter:
             if output.get("Description"):
                 body.append(hcl.Attr("description", str(output["Description"])))
             body.append(hcl.Attr("value", value))
-            rendered = hcl.render(value)
-            if any(re.search(rf"\bvar\.{name}\b", rendered) for name in self.sensitive):
+            if self._uses_sensitive(hcl.render(value)):
                 body.append(hcl.Attr("sensitive", True))
             export = output.get("Export")
             if isinstance(export, dict) and "Name" in export:

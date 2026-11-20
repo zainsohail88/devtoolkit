@@ -14,6 +14,7 @@ from converters.cfn.context import ResourceInfo, intrinsic_name, json_value
 from converters.cfn.hcl import Attr, Raw
 from converters.cfn.naming import UniqueNames, identifier
 from converters.cfn.resources import resource
+from converters.cfn.resources.messaging import counted_refs, main_index, only_when, optional
 
 # kind -> (inline policy type, attachment type, argument naming the principal)
 _PRINCIPALS = {
@@ -23,6 +24,7 @@ _PRINCIPALS = {
 }
 # The properties of AWS::IAM::Policy and AWS::IAM::ManagedPolicy that list principals.
 _TARGET_PROPS = (("role", "Roles"), ("user", "Users"), ("group", "Groups"))
+_NO_VALUE = {"Ref": "AWS::NoValue"}
 
 
 def _literal_text(value: Any) -> str | None:
@@ -57,13 +59,17 @@ def _inline_policies(b: Builder, kind: str) -> None:
     tf_type, _, argument = _PRINCIPALS[kind]
     suffixes = UniqueNames()
     entries = policies if isinstance(policies, list) else [policies]
-    for index, policy in enumerate(entries, 1):
+    for index, item in enumerate(entries, 1):
+        if b.ctx.is_no_value(item):
+            continue
+        # An `!If [Cond, {...}, !Ref AWS::NoValue]` entry becomes a counted resource.
+        when, policy = b.ctx.optional_item(item)
         if not isinstance(policy, dict) or intrinsic_name(policy) is not None:
             b.ctx.note(
                 f"{b.logical_id}: inline policy {index} is computed by a function and was not "
                 f"converted; add it as a {tf_type} by hand"
             )
-            b.props.comment(f"Policies[{index - 1}] was not converted: {snippet(policy)}")
+            b.props.comment(f"Policies[{index - 1}] was not converted: {snippet(item)}")
             continue
         name = policy.get("PolicyName")
         label = _literal_text(name) or f"policy_{index}"
@@ -72,7 +78,7 @@ def _inline_policies(b: Builder, kind: str) -> None:
         if name is not None:
             items.insert(0, Attr("name", b.ctx.expr(name)))
         items.append(Attr("policy", json_value(b.ctx, policy.get("PolicyDocument", {}))))
-        b.add_resource(tf_type, suffix, items)
+        b.add_resource(tf_type, suffix, items, when=when)
 
 
 def _managed_policies(b: Builder, kind: str) -> None:
@@ -90,7 +96,10 @@ def _managed_policies(b: Builder, kind: str) -> None:
         b.props.comment(f"ManagedPolicyArns was not converted: {snippet(arns)}")
         return
     suffixes = UniqueNames()
-    for index, arn in enumerate(arns, 1):
+    for index, item in enumerate(arns, 1):
+        if b.ctx.is_no_value(item):
+            continue
+        when, arn = b.ctx.optional_item(item)
         text = _literal_text(arn)
         label = text.rsplit("/", 1)[-1] if text and "/" in text else f"policy_{index}"
         suffix = suffixes.take("_" + identifier(label, f"policy_{index}"))
@@ -98,6 +107,7 @@ def _managed_policies(b: Builder, kind: str) -> None:
             tf_type,
             suffix,
             [Attr(argument, b.self_ref("name")), Attr("policy_arn", b.ctx.expr(arn))],
+            when=when,
         )
 
 
@@ -122,13 +132,14 @@ def iam_role(b: Builder) -> None:
 
 
 def _policy_targets(resource: dict[str, Any]) -> list[tuple[str, Any]]:
-    """(kind, principal) for every role, user and group listed literally."""
+    """(kind, principal) for every role, user and group listed literally. A principal may be
+    `!If [Cond, x, !Ref AWS::NoValue]`: it then gets a counted resource."""
     properties = resource.get("Properties") or {}
     targets: list[tuple[str, Any]] = []
     for kind, cfn_name in _TARGET_PROPS:
         values = properties.get(cfn_name)
         if isinstance(values, list):
-            targets.extend((kind, value) for value in values)
+            targets.extend((kind, value) for value in values if value != _NO_VALUE)
     return targets
 
 
@@ -141,24 +152,30 @@ def _take_targets(b: Builder) -> None:
 
 
 def _prepare_policy(info: ResourceInfo, resource: dict[str, Any]) -> None:
-    """The main resource's type follows the first principal (role, user or group)."""
+    """The main resource's type follows its principal (role, user or group): the first one
+    that is always there. When every principal is optional, the main resource is counted."""
     targets = _policy_targets(resource)
     if targets:
-        info.tf_type = _PRINCIPALS[targets[0][0]][0]
+        kind, principal = targets[main_index([value for _, value in targets])]
+        info.tf_type = _PRINCIPALS[kind][0]
+        if optional(principal):
+            counted_refs(info)
 
 
 @resource("AWS::IAM::Policy", "aws_iam_role_policy", prepare=_prepare_policy)
 def iam_policy(b: Builder) -> None:
-    """An inline policy for each listed role, user and group. The first principal gets the
-    main resource; each further one gets its own copy."""
+    """An inline policy for each listed role, user and group. The first principal that is
+    always there gets the main resource; each further one gets its own copy."""
     p = b.props
     targets = _policy_targets(b.resource)
     _take_targets(b)
     name = p.take("PolicyName")
     policy = json_value(b.ctx, p.take("PolicyDocument", {}))
-    principals: list[tuple[str, Any, str | None]] = [
-        (kind, b.ctx.expr(target), _target_name(target)) for kind, target in targets
-    ]
+    principals: list[tuple[str, Any, str | None, str | None]] = []
+    for kind, target in targets:
+        when, value = b.ctx.optional_item(target)
+        principals.append((kind, b.ctx.expr(value), _target_name(value), when))
+    main = main_index([target for _, target in targets])
     if not principals:
         variable = b.ctx.placeholder_variable(
             f"{b.logical_id}_role", f"Role that {b.logical_id} (AWS::IAM::Policy) is attached to"
@@ -167,18 +184,19 @@ def iam_policy(b: Builder) -> None:
             f"{b.logical_id} lists no role, user or group Terraform can read; it is attached "
             f"to {variable} instead"
         )
-        principals = [("role", Raw(variable), None)]
+        principals = [("role", Raw(variable), None, None)]
     suffixes = UniqueNames()
-    for index, (kind, value, label) in enumerate(principals):
+    for index, (kind, value, label, when) in enumerate(principals):
         items: list[Any] = [Attr(_PRINCIPALS[kind][2], value), Attr("policy", policy)]
         if name is not None:
             items.insert(0, Attr("name", b.ctx.expr(name)))
-        if index == 0:
+        if index == main:
             p.items.extend(items)
             continue
         fallback = f"{kind}_{index + 1}"
         suffix = suffixes.take("_" + identifier(label or fallback, fallback))
-        b.add_resource(_PRINCIPALS[kind][0], suffix, items)
+        b.add_resource(_PRINCIPALS[kind][0], suffix, items, when=when)
+    only_when(b, principals[main][3])
 
 
 @resource(
@@ -196,14 +214,16 @@ def iam_managed_policy(b: Builder) -> None:
     targets = _policy_targets(b.resource)
     _take_targets(b)
     suffixes = UniqueNames()
-    for index, (kind, target) in enumerate(targets, 1):
+    for index, (kind, item) in enumerate(targets, 1):
         _, tf_type, argument = _PRINCIPALS[kind]
+        when, target = b.ctx.optional_item(item)
         label = _target_name(target) or f"{kind}_{index}"
         suffix = suffixes.take("_" + identifier(label, f"{kind}_{index}"))
         b.add_resource(
             tf_type,
             suffix,
             [Attr(argument, b.ctx.expr(target)), Attr("policy_arn", b.self_ref("arn"))],
+            when=when,
         )
 
 

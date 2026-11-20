@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from converters.cfn import convert_template
 
@@ -11,6 +12,11 @@ def convert(resources: dict, **sections: object) -> tuple[str, list[str]]:
     result = convert_template(json.dumps({"Resources": resources, **sections}), stack_name="demo")
     files = {f["path"]: f["content"] for f in result["files"]}
     return files["main.tf"] + files.get("outputs.tf", ""), result["notes"]
+
+
+def squash(text: str) -> str:
+    """HCL without the alignment spaces before '='."""
+    return re.sub(r" +=", " =", text)
 
 
 def _db(policy: str | None = None, **props: object) -> dict:
@@ -83,8 +89,9 @@ def test_parameter_group_values():
         Parameters={"Value": {"Type": "String"}},
         Conditions={"On": {"Fn::Equals": [1, 1]}},
     )
-    assert 'value        = "1"' in main
-    assert "value        = var.value" in main
+    assert 'value = "1"' in main
+    assert "value = var.value" in main
+    assert "apply_method" not in main
     assert any("Computed.Parameters' was not converted" in n for n in notes)
 
 
@@ -166,3 +173,116 @@ def test_ssm_parameter_references():
     )
     assert "aws_ssm_parameter.p.name" in main
     assert "aws_ssm_parameter.p.value" in main
+
+
+def test_rds_names_are_lowercased_as_cloudformation_stores_them():
+    main, _ = convert(
+        {
+            "Db": _db(DBInstanceIdentifier="MyDatabase"),
+            "Cluster": {
+                "Type": "AWS::RDS::DBCluster",
+                "Properties": {
+                    "Engine": "aurora-postgresql",
+                    "DBClusterIdentifier": {"Fn::Sub": "${AWS::StackName}-Cluster"},
+                },
+            },
+            "Subnets": {
+                "Type": "AWS::RDS::DBSubnetGroup",
+                "Properties": {
+                    "DBSubnetGroupName": {"Ref": "GroupName"},
+                    "DBSubnetGroupDescription": "d",
+                    "SubnetIds": ["subnet-1"],
+                },
+            },
+            "Params": {
+                "Type": "AWS::RDS::DBParameterGroup",
+                "Properties": {
+                    "DBParameterGroupName": "MyParams",
+                    "Family": "postgres16",
+                    "Description": "d",
+                },
+            },
+            "Ref": _db("Delete", DBInstanceIdentifier={"Ref": "Params"}),
+        },
+        Parameters={"GroupName": {"Type": "String"}},
+    )
+    main = squash(main)
+    assert 'identifier = "mydatabase"' in main
+    assert 'final_snapshot_identifier = "mydatabase-final-snapshot"' in main
+    assert 'cluster_identifier = lower("${var.stack_name}-Cluster")' in main
+    assert "name = lower(var.group_name)" in main
+    assert 'name = "myparams"' in main
+    # A reference to a resource of the template is already lowercase.
+    assert "identifier = aws_db_parameter_group.params.name" in main
+
+
+def test_db_instance_applies_changes_immediately_like_cloudformation():
+    main, notes = convert(
+        {"Now": _db("Delete"), "Later": _db("Delete", ApplyImmediately=False)},
+    )
+    main = squash(main)
+    assert main.count("apply_immediately = true") == 1
+    assert main.count("apply_immediately = false") == 1
+    assert not any("ApplyImmediately" in n for n in notes)
+
+
+def test_cluster_member_instance_is_a_cluster_instance():
+    main, notes = convert(
+        {
+            "Cluster": {
+                "Type": "AWS::RDS::DBCluster",
+                "DeletionPolicy": "Delete",
+                "Properties": {"Engine": "aurora-postgresql"},
+            },
+            "Member": _db(
+                DBClusterIdentifier={"Ref": "Cluster"},
+                Engine="aurora-postgresql",
+                DBInstanceIdentifier="Member-1",
+                DBInstanceClass="db.serverless",
+                DBParameterGroupName="params",
+                PromotionTier=1,
+                PubliclyAccessible=False,
+                MonitoringInterval="60",
+                Tags=[{"Key": "a", "Value": "b"}],
+            ),
+        },
+        Outputs={
+            "Address": {"Value": {"Fn::GetAtt": ["Member", "Endpoint.Address"]}},
+            "Port": {"Value": {"Fn::GetAtt": ["Member", "Endpoint.Port"]}},
+            "Res": {"Value": {"Fn::GetAtt": ["Member", "DbiResourceId"]}},
+            "Id": {"Value": {"Ref": "Member"}},
+        },
+    )
+    main = squash(main)
+    assert 'resource "aws_rds_cluster_instance" "member"' in main
+    assert "cluster_identifier = aws_rds_cluster.cluster.cluster_identifier" in main
+    assert 'identifier = "member-1"' in main
+    assert 'db_parameter_group_name = "params"' in main
+    assert "promotion_tier = 1" in main
+    assert "apply_immediately = true" in main
+    member = main.split('resource "aws_rds_cluster_instance" "member"')[1]
+    assert "final_snapshot" not in member
+    assert not any(n.startswith("Member: CloudFormation snapshots") for n in notes)
+    assert not any("not converted" in n for n in notes)
+    for attribute in ("endpoint", "port", "dbi_resource_id", "identifier"):
+        assert f"aws_rds_cluster_instance.member.{attribute}" in main
+
+
+def test_parameter_group_applies_parameters_the_default_way():
+    main, notes = convert(
+        {
+            "Params": {
+                "Type": "AWS::RDS::DBParameterGroup",
+                "Properties": {
+                    "Family": "postgres16",
+                    "Description": "d",
+                    "Parameters": {"log_connections": True, "rds.force_ssl": False},
+                },
+            },
+        }
+    )
+    main = squash(main)
+    assert 'value = "true"' in main
+    assert 'value = "false"' in main
+    assert "apply_method" not in main
+    assert any('needs apply_method = "pending-reboot"' in n for n in notes)

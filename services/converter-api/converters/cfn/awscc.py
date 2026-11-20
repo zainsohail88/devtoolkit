@@ -96,7 +96,12 @@ def _value(b: Builder, shapes: _Shapes, value: Any, path: str) -> Any:
         # Tags written as [{Key, Value}] for a resource whose awscc tags are a map.
         return tags_map(ctx, value)
     if isinstance(value, list):
-        return [_value(b, shapes, item, path) for item in value]
+        # As in Context.expr: NoValue items go, and `!If [C, x, NoValue]` items are filtered.
+        kept = [item for item in value if not ctx.is_no_value(item)]
+        items = [_value(b, shapes, item, path) for item in kept]
+        if any(ctx.optional_item(item)[0] for item in kept):
+            return Raw(f"[for item in {hcl.inline(items)} : item if item != null]")
+        return items
     if not isinstance(value, dict):
         return value
     function = intrinsic_name(value)

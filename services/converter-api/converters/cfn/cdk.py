@@ -22,6 +22,7 @@ _BOOTSTRAP_RULE = "CheckBootstrapVersion"
 _AUTO_DELETE_TAG = "aws-cdk:auto-delete-objects"
 _PATH_SUFFIXES = ("Resource", "Default")
 _NON_WORD = re.compile(r"[^A-Za-z0-9]+")
+_SUB_NAME = re.compile(r"\$\{([A-Za-z0-9.]+)\}")
 
 
 def _path_name(path: str) -> str | None:
@@ -140,14 +141,19 @@ def prepare_cdk(
                 "aws_default_security_group for the VPC with no rules to get the same effect"
             )
 
-    # A provider role or function another resource still uses stays.
-    for logical_id in list(removed):
-        others = {k: v for k, v in resources.items() if k not in removed}
-        if logical_id in resources and resources[logical_id].get("Type") != "AWS::CDK::Metadata":
-            if _references(list(others.values()), {logical_id}) and not _only_in_policies(
-                others, logical_id
-            ):
-                removed.discard(logical_id)
+    # A provider role or function another resource still uses stays. References from bucket
+    # policies and DependsOn don't count: _clean_references removes those.
+    still_used: set[str] = set()
+    for logical_id, resource in resources.items():
+        if logical_id in removed or resource.get("Type") == "AWS::S3::BucketPolicy":
+            continue
+        stripped = {k: v for k, v in resource.items() if k not in ("DependsOn", "Metadata")}
+        still_used |= _referenced_ids(stripped)
+    removed = {
+        logical_id
+        for logical_id in removed
+        if logical_id not in still_used or resources[logical_id].get("Type") == "AWS::CDK::Metadata"
+    }
     for logical_id in removed:
         resources.pop(logical_id, None)
     _clean_references(template, removed)
@@ -203,16 +209,28 @@ def _uses_condition(template: dict[str, Any], name: str) -> bool:
     return walk(template["Resources"]) or walk(template.get("Outputs") or {}) or walk(others)
 
 
-def _only_in_policies(resources: dict[str, dict[str, Any]], logical_id: str) -> bool:
-    """True when the only references to `logical_id` are in bucket policy statements and
-    DependsOn, which _clean_references removes."""
-    for resource in resources.values():
-        stripped = {k: v for k, v in resource.items() if k not in ("DependsOn", "Metadata")}
-        if resource.get("Type") == "AWS::S3::BucketPolicy":
-            continue
-        if _references(stripped, {logical_id}):
-            return False
-    return True
+def _referenced_ids(value: Any) -> set[str]:
+    """Every logical id `value` refers to through Ref, Fn::GetAtt or Fn::Sub, in one walk."""
+    found: set[str] = set()
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if set(node) == {"Ref"} and isinstance(node["Ref"], str):
+                found.add(node["Ref"])
+            elif set(node) == {"Fn::GetAtt"}:
+                target = node["Fn::GetAtt"]
+                first = target[0] if isinstance(target, list) and target else str(target)
+                found.add(str(first).split(".")[0])
+            elif set(node) == {"Fn::Sub"}:
+                args = node["Fn::Sub"]
+                text = args[0] if isinstance(args, list) and args else args
+                if isinstance(text, str):
+                    found.update(m.split(".")[0] for m in _SUB_NAME.findall(text))
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return found
 
 
 def _drop_tag(resource: dict[str, Any], key: str) -> None:

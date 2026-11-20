@@ -1,5 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: IAM roles, policies, users and groups
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
 Resources:
   AppRole:
     Type: AWS::IAM::Role
@@ -19,6 +25,7 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
         - !Ref ReadPolicy
+        - !If [IsProd, !Ref AWS::NoValue, arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess]
       Policies:
         - PolicyName: read-logs
           PolicyDocument:
@@ -44,6 +51,7 @@ Resources:
             Resource: "*"
       Groups:
         - !Ref Developers
+        - !If [IsProd, !Ref AWS::NoValue, !Ref Developers]
   ExtraPolicy:
     Type: AWS::IAM::Policy
     Properties:
@@ -55,7 +63,7 @@ Resources:
             Action: sqs:SendMessage
             Resource: "*"
       Roles:
-        - !Ref AppRole
+        - !If [IsProd, !Ref AppRole, !Ref AWS::NoValue]
       Users:
         - !Ref Deployer
   Profile:

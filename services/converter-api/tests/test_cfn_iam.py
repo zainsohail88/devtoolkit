@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -92,7 +93,7 @@ def test_role_policies_computed_by_functions_are_reported():
                 "Condition": "On",
                 "Properties": {
                     "AssumeRolePolicyDocument": TRUST,
-                    "Policies": [{"Fn::If": ["On", {"PolicyName": "x"}, {"Ref": "AWS::NoValue"}]}],
+                    "Policies": [{"Fn::If": ["On", {"PolicyName": "x"}, {"PolicyName": "y"}]}],
                     "ManagedPolicyArns": {"Fn::If": ["On", ["arn:a"], []]},
                 },
             }
@@ -251,3 +252,98 @@ def test_user_and_group():
     assert 'resource "aws_iam_group_policy_attachment" "group_read_only_access"' in main
     assert any("User.LoginProfile' was not converted" in n for n in notes)
     assert any("Group had no GroupName" in n for n in notes)
+
+
+def squash(text: str) -> str:
+    """HCL without the alignment spaces before '='."""
+    return re.sub(r" +=", " =", text)
+
+
+ON = {"On": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}}
+ENV = {"Env": {"Type": "String"}}
+
+
+def _if(value: object) -> dict:
+    return {"Fn::If": ["On", value, {"Ref": "AWS::NoValue"}]}
+
+
+def _unless(value: object) -> dict:
+    return {"Fn::If": ["On", {"Ref": "AWS::NoValue"}, value]}
+
+
+def test_optional_managed_policies_and_inline_policies_are_counted():
+    main, notes, _ = convert(
+        {
+            "Role": {
+                "Type": "AWS::IAM::Role",
+                "Properties": {
+                    "AssumeRolePolicyDocument": TRUST,
+                    "ManagedPolicyArns": [
+                        "arn:aws:iam::aws:policy/ReadOnlyAccess",
+                        _if("arn:aws:iam::aws:policy/AdministratorAccess"),
+                        {"Ref": "AWS::NoValue"},
+                    ],
+                    "Policies": [
+                        _unless({"PolicyName": "dev", "PolicyDocument": DOC}),
+                        {"Ref": "AWS::NoValue"},
+                    ],
+                },
+            }
+        },
+        Parameters=ENV,
+        Conditions=ON,
+    )
+    main = squash(main)
+    admin = main.split('"aws_iam_role_policy_attachment" "role_administrator_access"')[1]
+    assert admin.startswith(" {\n  count = local.on ? 1 : 0")
+    assert 'policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"' in admin
+    assert "null" not in main
+    dev = main.split('"aws_iam_role_policy" "role_dev"')[1]
+    assert dev.startswith(" {\n  count = !local.on ? 1 : 0")
+    assert main.count("aws_iam_role_policy_attachment") == 2
+    assert not any("not converted" in n or "computed by a function" in n for n in notes)
+
+
+def test_policy_with_optional_principals():
+    main, _, files = convert(
+        {
+            "Role": {"Type": "AWS::IAM::Role", "Properties": {"AssumeRolePolicyDocument": TRUST}},
+            "User": {"Type": "AWS::IAM::User"},
+            "Policy": {
+                "Type": "AWS::IAM::Policy",
+                "Properties": {
+                    "PolicyName": "p",
+                    "PolicyDocument": DOC,
+                    "Roles": [_if({"Ref": "Role"}), {"Ref": "AWS::NoValue"}],
+                    "Users": [{"Ref": "User"}],
+                },
+            },
+            "OnlyOptional": {
+                "Type": "AWS::IAM::Policy",
+                "Properties": {
+                    "PolicyName": "q",
+                    "PolicyDocument": DOC,
+                    "Roles": [_if({"Ref": "Role"})],
+                },
+            },
+            "Managed": {
+                "Type": "AWS::IAM::ManagedPolicy",
+                "Properties": {"PolicyDocument": DOC, "Groups": [_if("admins")]},
+            },
+        },
+        Parameters=ENV,
+        Conditions=ON,
+        Outputs={"Ref": {"Value": {"Ref": "OnlyOptional"}}},
+    )
+    main = squash(main)
+    # The principal that is always there gets the main resource.
+    policy = main.split('resource "aws_iam_user_policy" "policy" {')[1].split("\n}")[0]
+    assert "count" not in policy and "user = aws_iam_user.user.name" in policy
+    role = main.split('resource "aws_iam_role_policy" "policy_role" {')[1].split("\n}")[0]
+    assert "count = local.on ? 1 : 0" in role and "role = aws_iam_role.role.name" in role
+    only = main.split('resource "aws_iam_role_policy" "only_optional" {')[1].split("\n}")[0]
+    assert "count = local.on ? 1 : 0" in only
+    assert "aws_iam_role_policy.only_optional[0].id" in files["outputs.tf"]
+    group = main.split('"aws_iam_group_policy_attachment" "managed_admins" {')[1]
+    assert group.startswith("\n  count = local.on ? 1 : 0") and 'group = "admins"' in group
+    assert "null" not in main

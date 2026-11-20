@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
+from converters.cfn import hcl
 from converters.cfn.builder import Builder, Props
-from converters.cfn.context import ResourceInfo, json_value
+from converters.cfn.context import ResourceInfo, _wrap, intrinsic_name, json_value
 from converters.cfn.hcl import BLANK, Attr, Block, Raw
 from converters.cfn.resources import resource
+from converters.cfn.resources.compute import optional_block
 
 # --- S3 ---------------------------------------------------------------------------------
 
@@ -120,7 +123,7 @@ def s3_bucket(b: Builder) -> None:
     lifecycle = p.take("LifecycleConfiguration")
     if lifecycle is not None:
         inner = _sub_props(b, lifecycle, "LifecycleConfiguration")
-        counter = iter(range(1, 1000))
+        counter = itertools.count(1)
         inner.block("rule", "Rules", lambda r: _lifecycle_rule(r, next(counter)))
         inner.finish()
         b.add_resource(
@@ -203,9 +206,13 @@ def s3_bucket(b: Builder) -> None:
                 cfn_name,
                 lambda r, a=target_attr, k=target_key: _notification(r, a, k),
             )
-        bridge = inner.take("EventBridgeConfiguration")
-        if isinstance(bridge, dict):
-            inner.set("eventbridge", _bool(bridge.get("EventBridgeEnabled", True)))
+        when, bridge = b.ctx.optional_item(inner.take("EventBridgeConfiguration"))
+        bridge = inner.literal("EventBridgeConfiguration", dict, value=bridge)
+        if bridge is not None:
+            enabled = b.ctx.expr(_bool(bridge.get("EventBridgeEnabled", True)))
+            if when is not None:
+                enabled = Raw(f"{when} ? {_wrap(hcl.inline(enabled))} : false")
+            inner.set("eventbridge", enabled)
         inner.finish()
         b.add_resource(
             "aws_s3_bucket_notification", "_notification", [*_bucket_items(b), *inner.items]
@@ -237,7 +244,11 @@ def _lifecycle_rule(r: Props, number: int) -> None:
     r.attr("status", "Status")
 
     prefix = r.take("Prefix")
-    tags = r.take("TagFilters")
+    tags = [
+        tag
+        for tag in (r.literal("TagFilters", list) or [])
+        if r.literal("TagFilters", dict, value=tag) is not None
+    ]
     greater = r.take("ObjectSizeGreaterThan")
     less = r.take("ObjectSizeLessThan")
     conditions = [x for x in (prefix, greater, less) if x is not None] + (tags or [])
@@ -276,13 +287,15 @@ def _lifecycle_rule(r: Props, number: int) -> None:
     # An empty filter means the whole bucket; the provider wants it spelled out.
     r.items.append(Block("filter", [], filter_items))
 
-    abort = r.take("AbortIncompleteMultipartUpload")
-    if isinstance(abort, dict):
+    when, abort = _optional(
+        r, "AbortIncompleteMultipartUpload", r.take("AbortIncompleteMultipartUpload")
+    )
+    if abort is not None:
         r.items.append(
-            Block(
+            optional_block(
                 "abort_incomplete_multipart_upload",
-                [],
                 [Attr("days_after_initiation", r.ctx.expr(abort.get("DaysAfterInitiation")))],
+                when,
             )
         )
 
@@ -299,23 +312,21 @@ def _lifecycle_rule(r: Props, number: int) -> None:
     if expiration:
         r.items.append(Block("expiration", [], expiration))
 
-    transitions = list(r.take("Transitions") or [])
-    single = r.take("Transition")
-    if single is not None:
-        transitions.append(single)
-    for transition in transitions:
+    for when, transition in _entries(r, "Transitions", "Transition"):
         items = [Attr("storage_class", r.ctx.expr(transition.get("StorageClass")))]
         if "TransitionInDays" in transition:
             items.insert(0, Attr("days", r.ctx.expr(transition["TransitionInDays"])))
         if "TransitionDate" in transition:
             items.insert(0, Attr("date", r.ctx.expr(transition["TransitionDate"])))
-        r.items.append(Block("transition", [], items))
+        r.items.append(optional_block("transition", items, when))
 
     noncurrent_days = r.take("NoncurrentVersionExpirationInDays")
-    noncurrent = r.take("NoncurrentVersionExpiration")
-    if noncurrent_days is not None or isinstance(noncurrent, dict):
+    when, noncurrent = _optional(
+        r, "NoncurrentVersionExpiration", r.take("NoncurrentVersionExpiration")
+    )
+    if noncurrent_days is not None or noncurrent is not None:
         items = []
-        if isinstance(noncurrent, dict):
+        if noncurrent is not None:
             noncurrent_days = noncurrent.get("NoncurrentDays", noncurrent_days)
             if "NewerNoncurrentVersions" in noncurrent:
                 items.append(
@@ -325,13 +336,11 @@ def _lifecycle_rule(r: Props, number: int) -> None:
                     )
                 )
         items.insert(0, Attr("noncurrent_days", r.ctx.expr(noncurrent_days)))
-        r.items.append(Block("noncurrent_version_expiration", [], items))
+        r.items.append(optional_block("noncurrent_version_expiration", items, when))
 
-    noncurrent_transitions = list(r.take("NoncurrentVersionTransitions") or [])
-    single = r.take("NoncurrentVersionTransition")
-    if single is not None:
-        noncurrent_transitions.append(single)
-    for transition in noncurrent_transitions:
+    for when, transition in _entries(
+        r, "NoncurrentVersionTransitions", "NoncurrentVersionTransition"
+    ):
         items = [
             Attr("noncurrent_days", r.ctx.expr(transition.get("TransitionInDays"))),
             Attr("storage_class", r.ctx.expr(transition.get("StorageClass"))),
@@ -340,7 +349,25 @@ def _lifecycle_rule(r: Props, number: int) -> None:
             items.append(
                 Attr("newer_noncurrent_versions", r.ctx.expr(transition["NewerNoncurrentVersions"]))
             )
-        r.items.append(Block("noncurrent_version_transition", [], items))
+        r.items.append(optional_block("noncurrent_version_transition", items, when))
+
+
+def _optional(r: Props, name: str, value: Any) -> tuple[str | None, Any]:
+    """A structure, or `!If [C, {...}, !Ref AWS::NoValue]` as (condition, structure). Other
+    functions are noted and give (None, None)."""
+    when, value = r.ctx.optional_item(value)
+    return when, r.literal(name, dict, value=value)
+
+
+def _entries(r: Props, many: str, one: str) -> list[tuple[str | None, Any]]:
+    """The structures of a list property plus its single-item form (Transitions and the
+    older Transition), each with the condition it exists under."""
+    values = list(r.literal(many, list) or [])
+    single = r.take(one)
+    if single is not None:
+        values.append(single)
+    entries = [_optional(r, many, value) for value in values]
+    return [(when, value) for when, value in entries if value is not None]
 
 
 def _cors_rule(r: Props) -> None:
@@ -389,9 +416,12 @@ def _object_lock_rule(r: Props) -> None:
 def _notification(r: Props, target_attr: str, target_key: str) -> None:
     r.list_attr("events", "Event")
     r.attr(target_attr, target_key)
-    filters = r.take("Filter")
-    rules = (filters or {}).get("S3Key", {}).get("Rules", []) if isinstance(filters, dict) else []
-    for rule in rules:
+    filters = r.literal("Filter", dict) or {}
+    key = r.literal("Filter.S3Key", dict, value=filters.get("S3Key")) or {}
+    for rule in r.literal("Filter.S3Key.Rules", list, value=key.get("Rules")) or []:
+        rule = r.literal("Filter.S3Key.Rules", dict, value=rule)
+        if rule is None:
+            continue
         name = str(rule.get("Name", "")).lower()
         if name in ("prefix", "suffix"):
             r.set(f"filter_{name}", r.ctx.expr(rule.get("Value")))
@@ -406,9 +436,9 @@ def s3_bucket_policy(b: Builder) -> None:
 # --- DynamoDB ---------------------------------------------------------------------------
 
 
-def _key_names(schema: Any) -> tuple[Any, Any]:
+def _key_names(r: Props) -> tuple[Any, Any]:
     hash_key = range_key = None
-    for key in schema if isinstance(schema, list) else []:
+    for key in _key_schema(r):
         if key.get("KeyType") == "HASH":
             hash_key = key.get("AttributeName")
         elif key.get("KeyType") == "RANGE":
@@ -416,16 +446,22 @@ def _key_names(schema: Any) -> tuple[Any, Any]:
     return hash_key, range_key
 
 
+def _key_schema(r: Props) -> list[dict[str, Any]]:
+    """KeySchema entries that are literal mappings (the others are noted)."""
+    keys = [r.literal("KeySchema", dict, value=key) for key in r.literal("KeySchema", list) or []]
+    return [key for key in keys if key is not None]
+
+
 def _throughput(r: Props) -> None:
-    throughput = r.take("ProvisionedThroughput")
-    if isinstance(throughput, dict):
+    throughput = r.literal("ProvisionedThroughput", dict)
+    if throughput is not None:
         r.set("read_capacity", r.ctx.expr(throughput.get("ReadCapacityUnits")))
         r.set("write_capacity", r.ctx.expr(throughput.get("WriteCapacityUnits")))
 
 
 def _projection(r: Props) -> None:
-    projection = r.take("Projection")
-    if isinstance(projection, dict):
+    projection = r.literal("Projection", dict)
+    if projection is not None:
         if projection.get("ProjectionType"):
             r.set("projection_type", r.ctx.expr(projection["ProjectionType"]))
         else:
@@ -436,7 +472,7 @@ def _projection(r: Props) -> None:
 
 def _global_index(r: Props) -> None:
     r.attr("name", "IndexName")
-    for key in r.take("KeySchema") or []:
+    for key in _key_schema(r):
         r.items.append(
             Block(
                 "key_schema",
@@ -457,12 +493,11 @@ def _global_index(r: Props) -> None:
             o.number("max_write_request_units", "MaxWriteRequestUnits"),
         ),
     )
-    r.drop("ContributorInsightsSpecification")
 
 
 def _local_index(r: Props) -> None:
     r.attr("name", "IndexName")
-    _, range_key = _key_names(r.take("KeySchema"))
+    _, range_key = _key_names(r)
     if range_key is not None:
         r.set("range_key", r.ctx.expr(range_key))
     _projection(r)
@@ -479,7 +514,7 @@ def dynamodb_table(b: Builder) -> None:
     p = b.props
     b.name_attr("name", "TableName")
     p.attr("billing_mode", "BillingMode")
-    hash_key, range_key = _key_names(p.take("KeySchema"))
+    hash_key, range_key = _key_names(p)
     if hash_key is not None:
         p.set("hash_key", b.ctx.expr(hash_key))
     if range_key is not None:
@@ -488,20 +523,32 @@ def dynamodb_table(b: Builder) -> None:
     p.attr("table_class", "TableClass")
     p.boolean("deletion_protection_enabled", "DeletionProtectionEnabled")
 
-    stream = p.take("StreamSpecification")
-    if isinstance(stream, dict):
-        p.set("stream_enabled", True)
-        p.set("stream_view_type", b.ctx.expr(stream.get("StreamViewType")))
+    when, stream = _optional(p, "StreamSpecification", p.take("StreamSpecification"))
+    if stream is not None:
+        inner = _sub_props(b, stream, "StreamSpecification")
+        view = b.ctx.expr(inner.take("StreamViewType"))
+        if when is None:
+            p.set("stream_enabled", True)
+            p.set("stream_view_type", view)
+        else:
+            p.set("stream_enabled", Raw(when))
+            p.set("stream_view_type", Raw(f"{when} ? {_wrap(hcl.inline(view))} : null"))
+        # ResourcePolicy and Tags (for the stream) have no counterpart on the table.
+        inner.finish()
+        p.items.extend(inner.items)
 
-    for attribute in p.take("AttributeDefinitions") or []:
+    for item in p.literal("AttributeDefinitions", list) or []:
+        when, attribute = _optional(p, "AttributeDefinitions", item)
+        if attribute is None:
+            continue
         p.items.append(
-            Block(
+            optional_block(
                 "attribute",
-                [],
                 [
                     Attr("name", b.ctx.expr(attribute.get("AttributeName"))),
                     Attr("type", b.ctx.expr(attribute.get("AttributeType"))),
                 ],
+                when,
             )
         )
     p.block("global_secondary_index", "GlobalSecondaryIndexes", _global_index)
@@ -516,7 +563,7 @@ def dynamodb_table(b: Builder) -> None:
         "SSESpecification",
         lambda s: (
             s.boolean("enabled", "SSEEnabled"),
-            s.attr("kms_key_arn", "KMSMasterKeyId"),
+            s.attr("kms_key_arn", "KMSMasterKeyId", lambda v: _kms_key_arn(b, v)),
             s.drop("SSEType"),
         ),
     )
@@ -537,6 +584,21 @@ def dynamodb_table(b: Builder) -> None:
         ),
     )
     p.tags()
+
+
+def _kms_key_arn(b: Builder, value: Any) -> Any:
+    """KMSMasterKeyId takes a key ID, ARN, alias name or alias ARN (and Ref of a KMS key
+    gives its ID); Terraform's kms_key_arn takes only an ARN."""
+    if isinstance(value, str) and value.startswith("arn:"):
+        return value
+    if isinstance(value, dict) and intrinsic_name(value) == "Fn::GetAtt":
+        return b.ctx.expr(value)
+    if isinstance(value, dict) and set(value) == {"Ref"}:
+        info = b.ctx.resources.get(str(value["Ref"]))
+        if info is not None and info.cfn_type == "AWS::KMS::Key" and info.kind == "aws":
+            return Raw(info.expression("arn"))
+    key = b.add_data("aws_kms_key", "_sse_key", [Attr("key_id", b.ctx.expr(value))])
+    return Raw(f"{key}.arn")
 
 
 # --- ECR --------------------------------------------------------------------------------
@@ -565,16 +627,25 @@ def ecr_repository(b: Builder) -> None:
         lambda e: e.attrs({"encryption_type": "EncryptionType", "kms_key": "KmsKey"}),
     )
     p.tags()
-    lifecycle = p.take("LifecyclePolicy")
-    if isinstance(lifecycle, dict) and lifecycle.get("LifecyclePolicyText"):
-        b.add_resource(
-            "aws_ecr_lifecycle_policy",
-            "_lifecycle",
-            [
-                Attr("repository", b.self_ref("name")),
-                Attr("policy", _json_text(b, lifecycle["LifecyclePolicyText"])),
-            ],
-        )
+    when, lifecycle = _optional(p, "LifecyclePolicy", p.take("LifecyclePolicy"))
+    if lifecycle is not None:
+        inner = _sub_props(b, lifecycle, "LifecyclePolicy")
+        text = inner.take("LifecyclePolicyText")
+        # RegistryId (another account's registry) has no counterpart: it is reported.
+        inner.finish()
+        if text is not None:
+            b.add_resource(
+                "aws_ecr_lifecycle_policy",
+                "_lifecycle",
+                [
+                    Attr("repository", b.self_ref("name")),
+                    Attr("policy", _json_text(b, text)),
+                    *inner.items,
+                ],
+                when=when,
+            )
+        else:
+            p.items.extend(inner.items)
     policy = p.take("RepositoryPolicyText")
     if policy is not None:
         b.add_resource(

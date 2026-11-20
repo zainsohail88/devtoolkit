@@ -2,14 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 from converters.cfn import hcl
-from converters.cfn.builder import Builder, Props, tags_map
-from converters.cfn.context import intrinsic_name
+from converters.cfn.builder import Builder, Props, snippet, tags_map
+from converters.cfn.context import _wrap, intrinsic_name
 from converters.cfn.hcl import Attr, Block, Raw
 from converters.cfn.resources import resource
+
+
+def optional_block(kind: str, items: list[Any], when: str | None) -> Block:
+    """A nested block, or (for an `!If [C, {...}, !Ref AWS::NoValue]` item) a dynamic block
+    present only `when` the condition holds."""
+    if when is None:
+        return Block(kind, [], items)
+    return Block(
+        "dynamic",
+        [kind],
+        [Attr("for_each", Raw(f"{when} ? [1] : []")), Block("content", [], items)],
+    )
+
+
+def both(first: str | None, second: str | None) -> str | None:
+    """Two optional conditions that must both hold."""
+    if first and second:
+        return f"{first} && {second}"
+    return first or second
+
 
 # --- Lambda code ------------------------------------------------------------------------
 
@@ -93,11 +115,22 @@ def _code(b: Builder, p: Props, cfn_name: str) -> None:
         inner.set("package_type", "Image")
     source = inner.take("ZipFile")
     if source is not None:
+        if re.search(r"cfn-?response", snippet_text(source)):
+            b.ctx.note(
+                f"{b.logical_id}: the inline code uses the cfn-response module, which "
+                "CloudFormation adds to ZipFile code; Terraform does not, so add the module "
+                "to the archive (or send the response yourself)"
+            )
         filename = _inline_filename(original.get("Handler"), original.get("Runtime"))
         content = [Attr("content", b.ctx.expr(source)), Attr("filename", filename)]
         _use_archive(b, inner, _archive(b, [hcl.BLANK, Block("source", [], content)]))
     inner.finish()
     p.items.extend(inner.items)
+
+
+def snippet_text(value: Any) -> str:
+    """All the text in a value, intrinsic functions included, for searching."""
+    return json.dumps(value, default=str)
 
 
 def _function_id(b: Builder, value: Any) -> str | None:
@@ -298,6 +331,7 @@ def lambda_layer_version(b: Builder) -> None:
 @resource(
     "AWS::Lambda::Url",
     "aws_lambda_function_url",
+    ref="function_arn",
     attrs={"FunctionUrl": "function_url", "FunctionArn": "function_arn"},
 )
 def lambda_url(b: Builder) -> None:
@@ -334,20 +368,26 @@ def lambda_alias(b: Builder) -> None:
             "function_version": "FunctionVersion",
         }
     )
-    routing = p.take("RoutingConfig")
-    if isinstance(routing, dict):
-        weights: dict[Any, Any] = {}
-        for entry in routing.get("AdditionalVersionWeights") or []:
-            version = b.ctx.expr(entry.get("FunctionVersion"))
-            weight_key = version if isinstance(version, str) else Raw(hcl.inline(version))
-            weights[weight_key] = b.ctx.expr(entry.get("FunctionWeight"))
-        p.items.append(Block("routing_config", [], [Attr("additional_version_weights", weights)]))
+    p.block("routing_config", "RoutingConfig", _routing_config)
     _provisioned_concurrency(b, function, b.self_ref("name"))
 
 
+def _routing_config(r: Props) -> None:
+    weights: dict[Any, Any] = {}
+    for entry in r.literal("AdditionalVersionWeights", list) or []:
+        entry = r.literal("AdditionalVersionWeights", dict, value=entry)
+        if entry is None:
+            continue
+        version = r.ctx.expr(entry.get("FunctionVersion"))
+        weight_key = version if isinstance(version, str) else Raw(hcl.inline(version))
+        weights[weight_key] = r.ctx.expr(entry.get("FunctionWeight"))
+    r.set("additional_version_weights", weights)
+
+
 def _provisioned_concurrency(b: Builder, function: Any, qualifier: Any) -> None:
-    config = b.props.take("ProvisionedConcurrencyConfig")
-    if not isinstance(config, dict):
+    when, config = b.ctx.optional_item(b.props.take("ProvisionedConcurrencyConfig"))
+    config = b.props.literal("ProvisionedConcurrencyConfig", dict, value=config)
+    if config is None:
         return
     b.add_resource(
         "aws_lambda_provisioned_concurrency_config",
@@ -360,6 +400,7 @@ def _provisioned_concurrency(b: Builder, function: Any, qualifier: Any) -> None:
                 b.ctx.expr(config.get("ProvisionedConcurrentExecutions")),
             ),
         ],
+        when=when,
     )
 
 
@@ -420,7 +461,11 @@ def _ebs_items(r: Props, with_snapshot: bool) -> None:
 
 def _instance_devices(b: Builder, p: Props) -> None:
     """BlockDeviceMappings as root, EBS and instance-store (ephemeral) device blocks."""
-    for mapping in p.take("BlockDeviceMappings") or []:
+    for item in p.literal("BlockDeviceMappings", list) or []:
+        when, mapping = b.ctx.optional_item(item)
+        mapping = p.literal("BlockDeviceMappings", dict, value=mapping)
+        if mapping is None:
+            continue
         where = f"{b.logical_id}.BlockDeviceMappings"
         inner = Props(b.ctx, mapping, where, p.owner)
         device = inner.take("DeviceName")
@@ -450,7 +495,7 @@ def _instance_devices(b: Builder, p: Props) -> None:
             disk.finish()
             inner.items.extend(disk.items)
         inner.finish()
-        p.items.append(Block(kind, [], inner.items))
+        p.items.append(optional_block(kind, inner.items, when))
 
 
 def _primary_interface(b: Builder, p: Props) -> None:
@@ -466,7 +511,15 @@ def _primary_interface(b: Builder, p: Props) -> None:
         return
     p.drop("NetworkInterfaces")
     inner = Props(b.ctx, interface, f"{b.logical_id}.NetworkInterfaces[0]", p.owner)
-    inner.drop("DeviceIndex", "DeleteOnTermination")
+    inner.drop("DeviceIndex")
+    keep = inner.take("DeleteOnTermination")
+    if keep is not None and not (keep is True or str(keep).lower() == "true"):
+        b.ctx.note(
+            f"{b.logical_id}: the primary network interface has DeleteOnTermination "
+            f"{snippet(keep)}, but the interface Terraform creates with the instance is always "
+            "deleted with it; to keep it, create an aws_network_interface and attach it"
+        )
+        inner.comment(f"DeleteOnTermination was not converted: {snippet(keep)}")
     inner.boolean("associate_public_ip_address", "AssociatePublicIpAddress")
     inner.attr("subnet_id", "SubnetId")
     inner.list_attr("vpc_security_group_ids", "GroupSet")
@@ -553,9 +606,11 @@ def ec2_launch_template(b: Builder) -> None:
     p.attr("name", "LaunchTemplateName")
     p.attr("description", "VersionDescription")
     own_tags: list[Any] = []
-    for spec in p.take("TagSpecifications") or []:
+    for spec in p.literal("TagSpecifications", list) or []:
         # The launch template's own tags (ResourceType: launch-template).
-        own_tags.extend(spec.get("Tags") or [])
+        spec = p.literal("TagSpecifications", dict, value=spec)
+        if spec is not None:
+            own_tags.extend(p.literal("TagSpecifications.Tags", list, value=spec.get("Tags")) or [])
     if own_tags:
         p.set("tags", tags_map(b.ctx, own_tags))
     data = p.take("LaunchTemplateData")
@@ -626,8 +681,17 @@ def _metadata_options(m: Props) -> None:
 
 
 def _template_device(r: Props) -> None:
-    r.attrs({"device_name": "DeviceName", "virtual_name": "VirtualName", "no_device": "NoDevice"})
+    r.attrs({"device_name": "DeviceName", "virtual_name": "VirtualName"})
+    # CloudFormation omits the device whenever NoDevice is present, usually as "". The
+    # provider ignores an empty no_device, so any value becomes a non-empty one.
+    r.attr("no_device", "NoDevice", lambda v: _no_device(r, v))
     r.block("ebs", "Ebs", lambda e: _ebs_items(e, with_snapshot=True))
+
+
+def _no_device(r: Props, value: Any) -> Any:
+    if isinstance(value, str):
+        return value or "true"
+    return Raw(f'coalesce({hcl.inline(r.ctx.expr(value))}, "true")')
 
 
 def _template_interface(r: Props) -> None:
@@ -663,7 +727,7 @@ def ecs_cluster(b: Builder) -> None:
     p.block(
         "service_connect_defaults",
         "ServiceConnectDefaults",
-        lambda s: s.attr("namespace", "Namespace"),
+        lambda s: s.attr("namespace", "Namespace", lambda v: _namespace(b, v)),
     )
     p.block("configuration", "Configuration", _cluster_configuration)
     p.tags()
@@ -683,6 +747,16 @@ def ecs_cluster(b: Builder) -> None:
         f"{b.logical_id}.DefaultCapacityProviderStrategy",
     )
     b.add_resource("aws_ecs_cluster_capacity_providers", "_capacity_providers", holder.items)
+
+
+def _namespace(b: Builder, value: Any) -> Any:
+    if isinstance(value, str) and not value.startswith("arn:"):
+        b.ctx.note(
+            f"{b.logical_id}: ServiceConnectDefaults.Namespace '{value}' is a namespace name, "
+            "which CloudFormation looks up (or creates); Terraform needs the namespace ARN, "
+            "e.g. from an aws_service_discovery_http_namespace"
+        )
+    return b.ctx.expr(value)
 
 
 def _strategy(r: Props) -> None:
@@ -739,6 +813,7 @@ _ECS_NUMBERS = {
     "sharedMemorySize",
     "maxSwap",
     "swappiness",
+    "size",
 }
 _ECS_BOOLEANS = {
     "essential",
@@ -755,26 +830,75 @@ _DIGITS = re.compile(r"^[0-9]+$")
 
 def ecs_json(value: Any) -> Any:
     """CloudFormation container definitions (PascalCase) as the JSON the ECS API takes
-    (camelCase). Intrinsic functions and user maps are left as written. Numbers and
-    booleans written as strings become real ones, as ECS rejects "256" for cpu."""
+    (camelCase). Intrinsic functions and user maps are left as written, but both branches of
+    an Fn::If are converted too. Numbers and booleans written as strings become real ones,
+    as ECS rejects "256" for cpu, and the string fields CloudFormation coerces (environment
+    values, labels, log options) become strings, as ECS rejects 8080 for them."""
     if isinstance(value, list):
         return [ecs_json(item) for item in value]
-    if not isinstance(value, dict) or intrinsic_name(value) is not None:
+    if not isinstance(value, dict):
         return value
+    if intrinsic_name(value) is not None:
+        return _branches(value, ecs_json)
     result: dict[str, Any] = {}
     for name, item in value.items():
         key = str(name)
         camel = key[:1].lower() + key[1:]
         if key in _ECS_MAPS:
-            result[camel] = item
+            result[camel] = _branches(item, _string_values)
             continue
         item = ecs_json(item)
-        if camel in _ECS_NUMBERS and isinstance(item, str) and _DIGITS.match(item):
-            item = int(item)
-        elif camel in _ECS_BOOLEANS and isinstance(item, str) and item.lower() in ("true", "false"):
-            item = item.lower() == "true"
-        result[camel] = item
+        if camel == "environment":
+            item = _branches(item, _environment)
+        result[camel] = _branches(item, lambda v, c=camel: _typed(c, v))
     return result
+
+
+def _branches(value: Any, convert: Callable[[Any], Any]) -> Any:
+    """`convert(value)`, or for `!If [C, a, b]` the same with a and b converted. Other
+    intrinsic functions are left as written."""
+    if isinstance(value, dict) and intrinsic_name(value) is not None:
+        args = value[intrinsic_name(value)]
+        if intrinsic_name(value) == "Fn::If" and isinstance(args, list) and len(args) == 3:
+            name, yes, no = args
+            return {"Fn::If": [name, _branches(yes, convert), _branches(no, convert)]}
+        return value
+    return convert(value)
+
+
+def _typed(camel: str, item: Any) -> Any:
+    if camel in _ECS_NUMBERS and isinstance(item, str) and _DIGITS.match(item):
+        return int(item)
+    if camel in _ECS_BOOLEANS and isinstance(item, str) and item.lower() in ("true", "false"):
+        return item.lower() == "true"
+    return item
+
+
+def _string(value: Any) -> Any:
+    """A literal as the text CloudFormation would pass: true -> "true", 8080 -> "8080"."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    return value
+
+
+def _string_values(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {k: _branches(v, _string) for k, v in value.items()}
+
+
+def _environment(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    return [_branches(entry, _environment_entry) for entry in value]
+
+
+def _environment_entry(entry: Any) -> Any:
+    if not isinstance(entry, dict) or "value" not in entry:
+        return entry
+    return {**entry, "value": _branches(entry["value"], _string)}
 
 
 @resource(
@@ -829,9 +953,13 @@ def ecs_task_definition(b: Builder) -> None:
 def _volume(r: Props) -> None:
     r.attr("name", "Name")
     r.boolean("configure_at_launch", "ConfigureAtLaunch")
-    host = r.take("Host")
-    if isinstance(host, dict) and host.get("SourcePath") is not None:
-        r.set("host_path", r.ctx.expr(host["SourcePath"]))
+    when, host = r.ctx.optional_item(r.take("Host"))
+    host = r.literal("Host", dict, value=host)
+    if host is not None and host.get("SourcePath") is not None:
+        path = r.ctx.expr(host["SourcePath"])
+        if when is not None:
+            path = Raw(f"{when} ? {_wrap(hcl.inline(path))} : null")
+        r.set("host_path", path)
     r.block("efs_volume_configuration", "EFSVolumeConfiguration", _efs_volume)
     r.block(
         "docker_volume_configuration",
@@ -881,7 +1009,8 @@ def ecs_service(b: Builder) -> None:
             "iam_role": "Role",
         }
     )
-    p.number("desired_count", "DesiredCount")
+    if not p.number("desired_count", "DesiredCount"):
+        _default_desired_count(b, p)
     p.number("health_check_grace_period_seconds", "HealthCheckGracePeriodSeconds")
     p.boolean("enable_execute_command", "EnableExecuteCommand")
     p.boolean("enable_ecs_managed_tags", "EnableECSManagedTags")
@@ -951,6 +1080,20 @@ def ecs_service(b: Builder) -> None:
     p.tags()
 
 
+def _default_desired_count(b: Builder, p: Props) -> None:
+    """CloudFormation starts one task when DesiredCount is left out (except for DAEMON
+    services, which take none); Terraform's default is 0."""
+    strategy = (b.resource.get("Properties") or {}).get("SchedulingStrategy")
+    if strategy is None or b.ctx.is_no_value(strategy):
+        p.set("desired_count", 1)
+    elif isinstance(strategy, str):
+        if strategy.upper() != "DAEMON":
+            p.set("desired_count", 1)
+    else:
+        strategy_text = _wrap(hcl.inline(b.ctx.expr(strategy)))
+        p.set("desired_count", Raw(f'{strategy_text} == "DAEMON" ? null : 1'))
+
+
 def _awsvpc(r: Props) -> None:
     r.list_attr("subnets", "Subnets")
     r.list_attr("security_groups", "SecurityGroups")
@@ -960,4 +1103,4 @@ def _awsvpc(r: Props) -> None:
     if isinstance(value, str) and value.upper() in ("ENABLED", "DISABLED"):
         r.set("assign_public_ip", value.upper() == "ENABLED")
     else:
-        r.set("assign_public_ip", Raw(f'{hcl.inline(r.ctx.expr(value))} == "ENABLED"'))
+        r.set("assign_public_ip", Raw(f'{_wrap(hcl.inline(r.ctx.expr(value)))} == "ENABLED"'))

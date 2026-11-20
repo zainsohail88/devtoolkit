@@ -1,5 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: Log groups, filters, alarms and a dashboard
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
 Resources:
   AppLogs:
     Type: AWS::Logs::LogGroup
@@ -75,7 +81,7 @@ Resources:
       AlarmName: shop-errors
       AlarmDescription: Too many errors
       ActionsEnabled: true
-      AlarmActions: [!Ref Alarms]
+      AlarmActions: [!Ref Alarms, !If [IsProd, !Ref Alarms, !Ref AWS::NoValue]]
       OKActions: [!Ref Alarms]
       InsufficientDataActions: [!Ref Alarms]
       ComparisonOperator: GreaterThanThreshold

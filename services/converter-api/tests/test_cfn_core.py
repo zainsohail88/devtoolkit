@@ -407,7 +407,8 @@ def test_azs_base64_cidr():
     )
     template = {"Parameters": {"C": {"Type": "String"}}}
     assert expression({"Fn::Cidr": [{"Ref": "C"}, 2, 8]}, template) == (
-        '[for i in range(2) : cidrsubnet(var.c, 32 - 8 - tonumber(split("/", var.c)[1]), i)]'
+        '[for i in range(2) : cidrsubnet(var.c, (strcontains(var.c, ":") ? 128 : 32) - 8 '
+        '- tonumber(split("/", var.c)[1]), i)]'
     )
 
 
@@ -938,3 +939,45 @@ def test_remaining_small_paths():
     main = files(template)["main.tf"]
     assert "state" not in main.split('resource "awscc_batch_job_queue"')[1].split("}")[0]
     assert 'max_age_seconds = "soon"' in main
+
+
+def test_lists_drop_no_value_items():
+    template = {"Conditions": {"C": {"Fn::Equals": ["a", "b"]}}}
+    assert expression(["a", {"Ref": "AWS::NoValue"}], template) == '["a"]'
+    assert expression(["a", {"Fn::If": ["C", "b", {"Ref": "AWS::NoValue"}]}], template) == (
+        '[for item in ["a", local.c ? "b" : null] : item if item != null]'
+    )
+    assert expression([{"Fn::If": ["C", {"Ref": "AWS::NoValue"}, "b"]}], template) == (
+        '[for item in [local.c ? null : "b"] : item if item != null]'
+    )
+    assert expression([{"Fn::If": ["C", "a", "b"]}], template) == '[local.c ? "a" : "b"]'
+
+
+def test_optional_items_and_literal_guard():
+    from converters.cfn.builder import Builder, Props
+    from converters.cfn.context import ResourceInfo
+
+    ctx = Context({"Resources": {}})
+    ctx.conditions["C"] = "c"
+    no = {"Ref": "AWS::NoValue"}
+    assert ctx.optional_item({"Fn::If": ["C", "x", no]}) == ("local.c", "x")
+    assert ctx.optional_item({"Fn::If": ["C", no, "x"]}) == ("!local.c", "x")
+    assert ctx.optional_item({"Fn::If": ["C", "x", "y"]}) == (None, {"Fn::If": ["C", "x", "y"]})
+    assert ctx.optional_item({"Fn::If": "bad"}) == (None, {"Fn::If": "bad"})
+    assert ctx.optional_item("x") == (None, "x")
+
+    props = Props(ctx, {"L": [1], "M": {"Ref": "X"}, "S": "text"}, "R", "R (T)")
+    assert props.literal("L", list) == [1]
+    assert props.literal("M", dict) is None and props.literal("S", list) is None
+    assert props.literal("Gone", list) is None
+    assert props.literal("V", dict, value={"a": 1}) == {"a": 1}
+    assert sum("is computed by a function" in n for n in ctx.notes) == 2
+
+    info = ResourceInfo("R", "AWS::X::Y", "aws_x", "r")
+    plain = Builder(ctx, info, {"Type": "AWS::X::Y"})
+    assert plain.count_items() == []
+    assert hcl.inline(plain.count_items("local.c")[0].value) == "local.c ? 1 : 0"
+    counted = Builder(ctx, info, {"Type": "AWS::X::Y", "Condition": "C"})
+    assert hcl.inline(counted.count_items("!local.c")[0].value) == "local.c && (!local.c) ? 1 : 0"
+    counted.add_resource("aws_y", "_extra", [], when="local.c")
+    assert "count = local.c && (local.c) ? 1 : 0" in hcl.render_block(counted.extra[0])

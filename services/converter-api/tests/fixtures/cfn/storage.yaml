@@ -79,6 +79,23 @@ Resources:
           - Status: Enabled
             ObjectSizeGreaterThan: 10
             NoncurrentVersionExpirationInDays: 30
+          - Id: conditional
+            Status: Enabled
+            Prefix: media/
+            Transitions:
+              - !If
+                - WithWebsite
+                - StorageClass: GLACIER
+                  TransitionInDays: 60
+                - !Ref AWS::NoValue
+            NoncurrentVersionExpiration: !If
+              - WithWebsite
+              - NoncurrentDays: 30
+              - !Ref AWS::NoValue
+            AbortIncompleteMultipartUpload: !If
+              - WithWebsite
+              - DaysAfterInitiation: 3
+              - !Ref AWS::NoValue
       CorsConfiguration:
         CorsRules:
           - Id: web
@@ -104,8 +121,10 @@ Resources:
         TopicConfigurations:
           - Event: s3:ObjectRestore:Completed
             Topic: arn:aws:sns:us-east-1:123456789012:restored
-        EventBridgeConfiguration:
-          EventBridgeEnabled: true
+        EventBridgeConfiguration: !If
+          - WithWebsite
+          - EventBridgeEnabled: true
+          - !Ref AWS::NoValue
       Tags:
         - Key: team
           Value: media
@@ -211,9 +230,21 @@ Resources:
       AttributeDefinitions:
         - AttributeName: id
           AttributeType: S
+        - !If
+          - WithWebsite
+          - AttributeName: kind
+            AttributeType: S
+          - !Ref AWS::NoValue
       KeySchema:
         - AttributeName: id
           KeyType: HASH
+      StreamSpecification: !If
+        - WithWebsite
+        - StreamViewType: KEYS_ONLY
+        - !Ref AWS::NoValue
+      SSESpecification:
+        SSEEnabled: true
+        KMSMasterKeyId: alias/shop-events
       OnDemandThroughput:
         MaxReadRequestUnits: 100
         MaxWriteRequestUnits: 50
@@ -226,6 +257,15 @@ Resources:
           OnDemandThroughput:
             MaxReadRequestUnits: 10
             MaxWriteRequestUnits: 10
+        - !If
+          - WithWebsite
+          - IndexName: by-kind
+            KeySchema:
+              - AttributeName: kind
+                KeyType: HASH
+            Projection:
+              ProjectionType: KEYS_ONLY
+          - !Ref AWS::NoValue
   Images:
     Type: AWS::ECR::Repository
     Properties:
@@ -251,6 +291,11 @@ Resources:
           Value: shop
   Cache:
     Type: AWS::ECR::Repository
+    Properties:
+      LifecyclePolicy: !If
+        - WithWebsite
+        - LifecyclePolicyText: '{"rules":[{"rulePriority":1,"selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+        - !Ref AWS::NoValue
 Outputs:
   AssetsArn:
     Value: !GetAtt Assets.Arn

@@ -1,5 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: Queues, topics, event rules, streams and a state machine
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
 Resources:
   DeadLetters:
     Type: AWS::SQS::Queue
@@ -38,7 +44,7 @@ Resources:
     Properties:
       Queues:
         - !Ref Orders
-        - !Ref Plain
+        - !If [IsProd, !Ref Plain, !Ref AWS::NoValue]
       PolicyDocument:
         Version: "2012-10-17"
         Statement:

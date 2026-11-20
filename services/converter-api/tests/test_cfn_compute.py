@@ -44,6 +44,14 @@ def test_fixture_converts_everything():
     assert "containerPort = 80" in main and "essential = true" in main
     assert '"com.example.Team" = "platform"' in main
     assert "aws_ecs_cluster_capacity_providers" in main
+    # Review regressions: defaults, conditional items and string coercion.
+    worker = main.split('resource "aws_ecs_service" "worker"')[1].split("\n}\n")[0]
+    agent = main.split('resource "aws_ecs_service" "agent"')[1].split("\n}\n")[0]
+    assert re.search(r"desired_count += 1", worker) and "desired_count" not in agent
+    assert re.search(r'no_device += "true"', main)
+    assert 'dynamic "ebs_block_device"' in main and 'dynamic "routing_config"' in main
+    assert 'value = "8080"' in main and 'value = "false"' in main and "size = 64" in main
+    assert "item if item != null" in main
 
 
 FUNCTION = {"Type": "AWS::Lambda::Function", "Properties": {"Role": "arn:role", "Runtime": "x"}}
@@ -354,8 +362,433 @@ def test_service_minimal_and_computed_public_ip():
             },
         }
     )
-    assert 'name    = "${var.stack_name}-Plain"' in main
+    assert 'name          = "${var.stack_name}-Plain"' in main
+    assert main.count("desired_count = 1") == 2
     assert 'assign_public_ip = data.aws_region.current.region == "ENABLED"' in main
     assert 'capacity_provider = "FARGATE_SPOT"' in main
     assert 'field = "attribute:ecs.az"' in main
     assert 'alarm_names = ["a"]' in main
+
+
+# --- regression tests for the review findings -------------------------------------------
+
+CONDITION = {
+    "Parameters": {"Env": {"Type": "String"}},
+    "Conditions": {"On": {"Fn::Equals": [{"Ref": "Env"}, "on"]}},
+}
+NO = {"Ref": "AWS::NoValue"}
+
+
+def optional(value):
+    return {"Fn::If": ["On", value, NO]}
+
+
+SERVICE = {"Type": "AWS::ECS::Service", "Properties": {"ServiceName": "s", "Cluster": "c"}}
+
+
+def test_service_desired_count_defaults_to_one_like_cloudformation():
+    main, _ = convert(
+        {
+            "Replica": SERVICE,
+            "Daemon": {
+                **SERVICE,
+                "Properties": {**SERVICE["Properties"], "SchedulingStrategy": "daemon"},
+            },
+            "Explicit": {**SERVICE, "Properties": {**SERVICE["Properties"], "DesiredCount": 0}},
+            "Chosen": {
+                **SERVICE,
+                "Properties": {
+                    **SERVICE["Properties"],
+                    "SchedulingStrategy": {"Fn::If": ["On", "DAEMON", "REPLICA"]},
+                },
+            },
+            "NoValue": {
+                **SERVICE,
+                "Properties": {**SERVICE["Properties"], "SchedulingStrategy": NO},
+            },
+        },
+        **CONDITION,
+    )
+    blocks = {
+        m.group(1): m.group(2)
+        for m in re.finditer(r'"aws_ecs_service" "(\w+)" \{(.*?)\n\}', main, re.S)
+    }
+    assert re.search(r"desired_count += 1", blocks["replica"])
+    assert re.search(r"desired_count += 1", blocks["no_value"])
+    assert "desired_count" not in blocks["daemon"]
+    assert re.search(r"desired_count += 0", blocks["explicit"])
+    assert (
+        'desired_count       = (local.on ? "DAEMON" : "REPLICA") == "DAEMON" ? null : 1'
+        in blocks["chosen"]
+    )
+
+
+def test_computed_assign_public_ip_is_parenthesised():
+    main, _ = convert(
+        {
+            "Svc": {
+                **SERVICE,
+                "Properties": {
+                    **SERVICE["Properties"],
+                    "NetworkConfiguration": {
+                        "AwsvpcConfiguration": {
+                            "Subnets": ["s"],
+                            "AssignPublicIp": {"Fn::If": ["On", "ENABLED", "DISABLED"]},
+                        }
+                    },
+                },
+            }
+        },
+        **CONDITION,
+    )
+    assert 'assign_public_ip = (local.on ? "ENABLED" : "DISABLED") == "ENABLED"' in main
+
+
+def test_launch_template_no_device_is_never_empty():
+    main, _ = convert(
+        {
+            "Lt": {
+                "Type": "AWS::EC2::LaunchTemplate",
+                "Properties": {
+                    "LaunchTemplateData": {
+                        "BlockDeviceMappings": [
+                            {"DeviceName": "/dev/sdb", "NoDevice": ""},
+                            {"DeviceName": "/dev/sdc", "NoDevice": "yes"},
+                            {"DeviceName": "/dev/sdd", "NoDevice": {"Ref": "Env"}},
+                        ]
+                    }
+                },
+            }
+        },
+        **CONDITION,
+    )
+    assert 'no_device   = "true"' in main
+    assert 'no_device   = "yes"' in main
+    assert 'no_device   = coalesce(var.env, "true")' in main
+
+
+def test_root_method_path_is_not_every_resource():
+    from converters.cfn.resources.apigateway import _method_path
+
+    assert _method_path("/", "GET") == "~1/GET"
+
+
+def test_inline_code_using_cfn_response_is_noted():
+    code = {"ZipFile": {"Fn::Sub": "import cfnresponse\n"}}
+    _, notes = convert({"Fn": {**FUNCTION, "Properties": {**FUNCTION["Properties"], "Code": code}}})
+    assert any("cfn-response module" in n for n in notes)
+    plain = {"ZipFile": "def handler(e, c): pass\n"}
+    _, notes = convert(
+        {"Fn": {**FUNCTION, "Properties": {**FUNCTION["Properties"], "Code": plain}}}
+    )
+    assert not any("cfn-response" in n for n in notes)
+
+
+def test_ref_of_function_url_is_the_function_arn():
+    result = convert_template(
+        yaml.safe_dump(
+            {
+                "Resources": {
+                    "Url": {
+                        "Type": "AWS::Lambda::Url",
+                        "Properties": {"TargetFunctionArn": "arn:fn", "AuthType": "NONE"},
+                    }
+                },
+                "Outputs": {"U": {"Value": {"Ref": "Url"}}},
+            }
+        ),
+        stack_name="demo",
+    )
+    outputs = next(f["content"] for f in result["files"] if f["path"] == "outputs.tf")
+    assert "aws_lambda_function_url.url.function_arn" in outputs
+
+
+def test_primary_interface_kept_on_termination_is_noted():
+    main, notes = convert(
+        {
+            "Vm": {
+                "Type": "AWS::EC2::Instance",
+                "Properties": {
+                    "ImageId": "ami-1",
+                    "NetworkInterfaces": [
+                        {"DeviceIndex": 0, "SubnetId": "s", "DeleteOnTermination": "false"}
+                    ],
+                },
+            },
+            "Default": {
+                "Type": "AWS::EC2::Instance",
+                "Properties": {
+                    "ImageId": "ami-1",
+                    "NetworkInterfaces": [
+                        {"DeviceIndex": 0, "SubnetId": "s", "DeleteOnTermination": "True"}
+                    ],
+                },
+            },
+        }
+    )
+    assert '# DeleteOnTermination was not converted: "false"' in main
+    assert sum("primary network interface" in n for n in notes) == 1
+
+
+def test_container_definitions_types_strings_and_conditional_containers():
+    value = [
+        {
+            "Name": "app",
+            "Environment": [
+                {"Name": "PORT", "Value": 8080},
+                {"Name": "DEBUG", "Value": False},
+                {"Name": "RATIO", "Value": 0.5},
+                {"Fn::If": ["On", {"Name": "X", "Value": 1}, NO]},
+                "odd",
+                {"Name": "NOVALUE"},
+            ],
+            "DockerLabels": {"version": 2},
+            "LogConfiguration": {"Options": {"awslogs-create-group": True}},
+            "LinuxParameters": {"Tmpfs": [{"ContainerPath": "/scratch", "Size": "64"}]},
+            "Memory": {"Fn::If": ["On", "512", "256"]},
+        },
+        {"Fn::If": ["On", {"Name": "sidecar", "Essential": "false"}, NO]},
+        {"Fn::If": ["On"]},
+        {"Ref": "Containers"},
+        {"Environment": "odd", "DockerLabels": "odd"},
+    ]
+    assert ecs_json(value) == [
+        {
+            "name": "app",
+            "environment": [
+                {"name": "PORT", "value": "8080"},
+                {"name": "DEBUG", "value": "false"},
+                {"name": "RATIO", "value": "0.5"},
+                {"Fn::If": ["On", {"name": "X", "value": "1"}, NO]},
+                "odd",
+                {"name": "NOVALUE"},
+            ],
+            "dockerLabels": {"version": "2"},
+            "logConfiguration": {"options": {"awslogs-create-group": "true"}},
+            "linuxParameters": {"tmpfs": [{"containerPath": "/scratch", "size": 64}]},
+            "memory": {"Fn::If": ["On", 512, 256]},
+        },
+        {"Fn::If": ["On", {"name": "sidecar", "essential": False}, NO]},
+        {"Fn::If": ["On"]},
+        {"Ref": "Containers"},
+        {"environment": "odd", "dockerLabels": "odd"},
+    ]
+
+
+def test_conditional_container_is_filtered_out_of_the_list():
+    main, _ = convert(
+        {
+            "Task": {
+                "Type": "AWS::ECS::TaskDefinition",
+                "Properties": {
+                    "Family": "f",
+                    "ContainerDefinitions": [
+                        {"Name": "app", "Image": "i"},
+                        optional({"Name": "sidecar", "Image": "busybox", "Memory": "64"}),
+                    ],
+                    "Volumes": [
+                        {"Name": "logs", "Host": optional({"SourcePath": "/var/log"})},
+                        {"Name": "odd", "Host": {"Fn::If": ["On", {"SourcePath": "/a"}, {}]}},
+                    ],
+                },
+            }
+        },
+        **CONDITION,
+    )
+    assert "item if item != null" in main
+    assert re.search(r"local\.on \? \{ [^}]*memory = 64[^}]* \} : null", main)
+    assert 'host_path = local.on ? "/var/log" : null' in main
+    assert "# Host was not converted" in main
+
+
+def test_namespace_name_is_noted():
+    main, notes = convert(
+        {
+            "Name": {
+                "Type": "AWS::ECS::Cluster",
+                "Properties": {"ClusterName": "a", "ServiceConnectDefaults": {"Namespace": "ns"}},
+            },
+            "Arn": {
+                "Type": "AWS::ECS::Cluster",
+                "Properties": {
+                    "ClusterName": "b",
+                    "ServiceConnectDefaults": {"Namespace": "arn:aws:servicediscovery:ns"},
+                },
+            },
+        }
+    )
+    assert 'namespace = "ns"' in main
+    assert sum("Terraform needs the namespace ARN" in n for n in notes) == 1
+
+
+def test_conditional_alias_routing_and_concurrency():
+    main, notes = convert(
+        {
+            "Fn": FUNCTION,
+            "Alias": {
+                "Type": "AWS::Lambda::Alias",
+                "Properties": {
+                    "Name": "live",
+                    "FunctionName": {"Ref": "Fn"},
+                    "FunctionVersion": "1",
+                    "RoutingConfig": optional(
+                        {
+                            "AdditionalVersionWeights": [
+                                {"FunctionVersion": "2", "FunctionWeight": 0.5},
+                                {"Ref": "Weight"},
+                            ]
+                        }
+                    ),
+                    "ProvisionedConcurrencyConfig": optional(
+                        {"ProvisionedConcurrentExecutions": 1}
+                    ),
+                },
+            },
+            "Computed": {
+                "Type": "AWS::Lambda::Alias",
+                "Properties": {
+                    "Name": "c",
+                    "FunctionName": {"Ref": "Fn"},
+                    "FunctionVersion": "1",
+                    "RoutingConfig": {"AdditionalVersionWeights": {"Ref": "Weights"}},
+                    "ProvisionedConcurrencyConfig": {"Fn::If": ["On", {"A": 1}, {"B": 2}]},
+                },
+            },
+        },
+        Parameters={
+            "Env": {"Type": "String"},
+            "Weight": {"Type": "String"},
+            "Weights": {"Type": "String"},
+        },
+        Conditions=CONDITION["Conditions"],
+    )
+    assert 'dynamic "routing_config" {\n    for_each = local.on ? [1] : []' in main
+    assert '"2" = 0.5' in main
+    assert "count = local.on ? 1 : 0" in main
+    assert "additional_version_weights = {}" in main
+    assert "# AdditionalVersionWeights was not converted" in main
+    assert "# ProvisionedConcurrencyConfig was not converted" in main
+
+
+def test_conditional_and_computed_block_device_mappings():
+    main, notes = convert(
+        {
+            "Vm": {
+                "Type": "AWS::EC2::Instance",
+                "Properties": {
+                    "ImageId": "ami-1",
+                    "BlockDeviceMappings": [
+                        optional({"DeviceName": "/dev/sdf", "Ebs": {"VolumeSize": 10}}),
+                        {"Fn::If": ["On", {"DeviceName": "/dev/sdg"}, {"DeviceName": "/dev/sdh"}]},
+                    ],
+                },
+            },
+            "Whole": {
+                "Type": "AWS::EC2::Instance",
+                "Properties": {"ImageId": "ami-1", "BlockDeviceMappings": optional([])},
+            },
+        },
+        **CONDITION,
+    )
+    assert 'dynamic "ebs_block_device" {\n    for_each = local.on ? [1] : []' in main
+    assert 'device_name = "/dev/sdf"' in main
+    assert "# BlockDeviceMappings was not converted" in main
+    assert "ebs_block_device {\n    device_name = null" not in main
+    assert any("'Whole.BlockDeviceMappings' is computed" in n for n in notes)
+
+
+def test_computed_launch_template_tag_specifications_do_not_crash():
+    main, notes = convert(
+        {
+            "Whole": {
+                "Type": "AWS::EC2::LaunchTemplate",
+                "Properties": {
+                    "TagSpecifications": optional([{"ResourceType": "launch-template"}])
+                },
+            },
+            "Items": {
+                "Type": "AWS::EC2::LaunchTemplate",
+                "Properties": {
+                    "TagSpecifications": [
+                        optional({"ResourceType": "launch-template"}),
+                        {"ResourceType": "launch-template", "Tags": {"Ref": "Tags"}},
+                    ]
+                },
+            },
+        },
+        Parameters={"Env": {"Type": "String"}, "Tags": {"Type": "String"}},
+        Conditions=CONDITION["Conditions"],
+    )
+    assert main.count("# TagSpecifications") == 3
+    assert "# TagSpecifications.Tags was not converted" in main
+    assert len([n for n in notes if "is computed by a function" in n]) == 3
+
+
+EVIL = 'x" ${file("/etc/passwd")} y'
+
+
+def test_template_text_cannot_inject_hcl():
+    main, _ = convert(
+        {
+            "Fn": {
+                "Type": "AWS::Lambda::Function",
+                "Properties": {
+                    "FunctionName": EVIL,
+                    "Role": EVIL,
+                    "Handler": EVIL,
+                    "Runtime": "python3.12",
+                    "Code": {"ZipFile": EVIL},
+                },
+            },
+            "Vm": {
+                "Type": "AWS::EC2::Instance",
+                "Properties": {
+                    "ImageId": EVIL,
+                    "BlockDeviceMappings": [{"DeviceName": EVIL, "Ebs": {"VolumeSize": 1}}],
+                    "NetworkInterfaces": [
+                        {"DeviceIndex": 0, "SubnetId": EVIL, "DeleteOnTermination": EVIL}
+                    ],
+                },
+            },
+            "Task": {
+                "Type": "AWS::ECS::TaskDefinition",
+                "Properties": {
+                    "Family": EVIL,
+                    "ContainerDefinitions": [
+                        {"Name": EVIL, "Environment": [{"Name": EVIL, "Value": EVIL}]}
+                    ],
+                    "Volumes": [{"Name": EVIL, "Host": {"SourcePath": EVIL}}],
+                },
+            },
+            "Lt": {
+                "Type": "AWS::EC2::LaunchTemplate",
+                "Properties": {
+                    "LaunchTemplateData": {
+                        "BlockDeviceMappings": [{"DeviceName": EVIL, "NoDevice": EVIL}]
+                    }
+                },
+            },
+            "Svc": {
+                **SERVICE,
+                "Properties": {
+                    **SERVICE["Properties"],
+                    "SchedulingStrategy": EVIL,
+                    "NetworkConfiguration": {
+                        "AwsvpcConfiguration": {"Subnets": [EVIL], "AssignPublicIp": EVIL}
+                    },
+                },
+            },
+            "Cl": {
+                "Type": "AWS::ECS::Cluster",
+                "Properties": {"ClusterName": EVIL, "ServiceConnectDefaults": {"Namespace": EVIL}},
+            },
+        }
+    )
+    assert_no_injection(main)
+
+
+def assert_no_injection(main: str) -> None:
+    """EVIL only ever appears escaped outside comments (which are one line of JSON text)."""
+    code = "\n".join(line for line in main.splitlines() if not line.lstrip().startswith("#"))
+    assert 'file("' not in code
+    assert not re.search(r"(?<!\$)\$\{file", code)

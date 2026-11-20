@@ -88,12 +88,12 @@ def _metric_query(q: Props) -> None:
     q.boolean("return_data", "ReturnData")
     q.number("period", "Period")
     q.attr("account_id", "AccountId")
-    stat = q.take("MetricStat")
-    if not isinstance(stat, dict):
+    stat = q.literal("MetricStat", dict)
+    if stat is None:
         return
     inner = Props(q.ctx, stat, f"{q.where}.MetricStat", q.owner)
-    metric = inner.take("Metric") or {}
-    if isinstance(metric, dict):
+    metric = inner.literal("Metric", dict)
+    if metric is not None:
         if "MetricName" in metric:
             inner.set("metric_name", q.ctx.expr(metric["MetricName"]))
         if "Namespace" in metric:

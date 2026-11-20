@@ -7,6 +7,11 @@ Parameters:
   LogGroupArn:
     Type: String
     Default: arn:aws:logs:us-east-1:123456789012:log-group:api
+  Debug:
+    Type: String
+    Default: "false"
+Conditions:
+  Debugging: !Equals [!Ref Debug, "true"]
 Resources:
   Api:
     Type: AWS::ApiGateway::RestApi
@@ -40,6 +45,10 @@ Resources:
         - StatusCode: 200
           ResponseModels:
             application/json: Empty
+        - !If
+          - Debugging
+          - StatusCode: 500
+          - !Ref AWS::NoValue
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -48,6 +57,11 @@ Resources:
         IntegrationResponses:
           - StatusCode: 200
             SelectionPattern: ""
+          - !If
+            - Debugging
+            - StatusCode: 500
+              SelectionPattern: "Error.*"
+            - !Ref AWS::NoValue
   PostOrders:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -87,6 +101,15 @@ Resources:
         - ResourcePath: "/~1orders"
           HttpMethod: GET
           CachingEnabled: false
+        - ResourcePath: /
+          HttpMethod: GET
+          MetricsEnabled: true
+        - !If
+          - Debugging
+          - ResourcePath: "/*"
+            HttpMethod: POST
+            DataTraceEnabled: true
+          - !Ref AWS::NoValue
   SpecApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
@@ -163,6 +186,10 @@ Resources:
       RouteSettings:
         GET /orders:
           ThrottlingBurstLimit: 5
+        GET /debug: !If
+          - Debugging
+          - ThrottlingBurstLimit: 1
+          - !Ref AWS::NoValue
       AccessLogSettings:
         DestinationArn: !Ref LogGroupArn
         Format: "$context.requestId"
@@ -182,6 +209,10 @@ Resources:
       RequestParameters:
         route.request.header.Auth:
           Required: true
+        route.request.querystring.trace: !If
+          - Debugging
+          - Required: false
+          - !Ref AWS::NoValue
   SpecHttpApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:

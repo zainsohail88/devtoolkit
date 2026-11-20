@@ -28,6 +28,10 @@ def test_fixture_converts_everything():
     assert not [n for n in result["notes"] if "was not converted" in n]
     files = {f["path"]: squeeze(f["content"]) for f in result["files"]}
     main = files["main.tf"]
+    assert "kms_key_arn = data.aws_kms_key.events_sse_key.arn" in main
+    assert "stream_enabled = local.with_website" in main
+    assert 'dynamic "attribute"' in main and 'dynamic "transition"' in main
+    assert "eventbridge = local.with_website ? true : false" in main
     for kind in (
         "aws_s3_bucket_versioning",
         "aws_s3_bucket_server_side_encryption_configuration",
@@ -54,7 +58,6 @@ def test_fixture_converts_everything():
     assert 'target_prefix = "assets/"' in main
     assert 'target_bucket = aws_s3_bucket.redirect.id\n target_prefix = ""' in main
     assert 'filter_prefix = "uploads/"' in main and 'filter_suffix = ".jpg"' in main
-    assert "eventbridge = true" in main
     assert "max_age_seconds = 3600" in main
     assert 'replace_key_prefix_with = "documents/"' in main
     assert 'range_key = "sk"' in main and "read_capacity = 5" in main
@@ -196,7 +199,8 @@ def test_dynamodb_table_with_only_a_hash_key_and_no_stream():
         }
     )
     assert 'name = "t"' in main and "hash_key" not in main
-    assert 'local_secondary_index {\n name = "l"\n }' in main
+    assert 'local_secondary_index {\n name = "l"\n # Projection was not converted: "x"\n }' in main
+    assert '# KeySchema was not converted: "computed"' in main
     assert not any("TableName" in n for n in notes)
 
 
@@ -241,3 +245,350 @@ def test_lifecycle_dates_single_noncurrent_transition_and_string_booleans():
     assert "expired_object_delete_marker = true" in main
     assert 'date = "2030-01-01T00:00:00Z"' in main
     assert "noncurrent_version_transition {\n noncurrent_days = 5" in main
+
+
+# --- regression tests for the review findings -------------------------------------------
+
+NO = {"Ref": "AWS::NoValue"}
+CONDITION = {
+    "Parameters": {"Env": {"Type": "String"}, "List": {"Type": "String"}},
+    "Conditions": {"On": {"Fn::Equals": [{"Ref": "Env"}, "on"]}},
+}
+EVIL = 'x" ${file("/etc/passwd")} y'
+TABLE = {
+    "TableName": "t",
+    "BillingMode": "PAY_PER_REQUEST",
+    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+}
+
+
+def optional(value):
+    return {"Fn::If": ["On", value, NO]}
+
+
+def table(**properties) -> dict:
+    return {"Type": "AWS::DynamoDB::Table", "Properties": {**TABLE, **properties}}
+
+
+def bucket_rule(**rule) -> dict:
+    return {
+        "Type": "AWS::S3::Bucket",
+        "Properties": {"LifecycleConfiguration": {"Rules": [{"Status": "Enabled", **rule}]}},
+    }
+
+
+def assert_no_injection(main: str) -> None:
+    code = "\n".join(line for line in main.splitlines() if not line.lstrip().startswith("#"))
+    assert 'file("' not in code
+    assert not re.search(r"(?<!\$)\$\{file", code)
+
+
+def test_sse_key_that_is_not_an_arn_is_looked_up():
+    main, _ = convert(
+        {
+            "Alias": table(SSESpecification={"SSEEnabled": True, "KMSMasterKeyId": "alias/k"}),
+            "Arn": table(
+                TableName="a",
+                SSESpecification={"SSEEnabled": True, "KMSMasterKeyId": "arn:aws:kms:k"},
+            ),
+            "Key": {"Type": "AWS::KMS::Key", "Properties": {}},
+            "Ref": table(TableName="r", SSESpecification={"KMSMasterKeyId": {"Ref": "Key"}}),
+            "Att": table(
+                TableName="g", SSESpecification={"KMSMasterKeyId": {"Fn::GetAtt": ["Key", "Arn"]}}
+            ),
+            "Param": table(TableName="p", SSESpecification={"KMSMasterKeyId": {"Ref": "Env"}}),
+        },
+        **CONDITION,
+    )
+    assert "kms_key_arn = data.aws_kms_key.alias_sse_key.arn" in main
+    assert 'data "aws_kms_key" "alias_sse_key" {\n key_id = "alias/k"\n}' in main
+    assert 'kms_key_arn = "arn:aws:kms:k"' in main
+    assert main.count("kms_key_arn = aws_kms_key.key.arn") == 2
+    assert 'data "aws_kms_key" "param_sse_key" {\n key_id = var.env\n}' in main
+
+
+def test_sse_key_lookup_follows_the_table_condition():
+    main, _ = convert(
+        {
+            "T": {
+                **table(SSESpecification={"SSEEnabled": True, "KMSMasterKeyId": "k"}),
+                "Condition": "On",
+            }
+        },
+        **CONDITION,
+    )
+    assert "kms_key_arn = data.aws_kms_key.t_sse_key[0].arn" in main
+    assert 'data "aws_kms_key" "t_sse_key" {\n count = local.on ? 1 : 0' in main
+
+
+def test_conditional_stream_and_stream_policy_is_reported():
+    main, notes = convert(
+        {
+            "Cond": table(StreamSpecification=optional({"StreamViewType": "KEYS_ONLY"})),
+            "Policy": table(
+                TableName="p",
+                StreamSpecification={"StreamViewType": "NEW_IMAGE", "ResourcePolicy": {"P": 1}},
+            ),
+            "Computed": table(
+                TableName="c",
+                StreamSpecification={
+                    "Fn::If": ["On", {"StreamViewType": "A"}, {"StreamViewType": "B"}]
+                },
+            ),
+        },
+        **CONDITION,
+    )
+    assert "stream_enabled = local.on" in main
+    assert 'stream_view_type = local.on ? "KEYS_ONLY" : null' in main
+    assert "stream_view_type = null" not in main
+    assert '# ResourcePolicy was not converted: {"P": 1}' in main
+    assert any("'Policy.StreamSpecification.ResourcePolicy' was not converted" in n for n in notes)
+    assert "# StreamSpecification was not converted" in main
+
+
+def test_contributor_insights_of_an_index_is_reported():
+    main, notes = convert(
+        {
+            "T": table(
+                GlobalSecondaryIndexes=[
+                    {
+                        "IndexName": "g",
+                        "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "ALL"},
+                        "ContributorInsightsSpecification": {"Enabled": True},
+                    }
+                ]
+            )
+        }
+    )
+    assert "# ContributorInsightsSpecification was not converted" in main
+    assert any("GlobalSecondaryIndexes[0].ContributorInsightsSpecification" in n for n in notes)
+
+
+def test_computed_table_structures_are_reported_not_guessed():
+    main, notes = convert(
+        {
+            "T": table(
+                AttributeDefinitions=[
+                    {"AttributeName": "pk", "AttributeType": "S"},
+                    optional({"AttributeName": "gk", "AttributeType": "S"}),
+                    {"Fn::If": ["On", {"AttributeName": "a"}, {"AttributeName": "b"}]},
+                ],
+                KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}, {"Ref": "List"}],
+                ProvisionedThroughput={"Ref": "List"},
+                GlobalSecondaryIndexes=[
+                    {
+                        "IndexName": "g",
+                        "KeySchema": {"Ref": "List"},
+                        "Projection": {"Fn::If": ["On", {"ProjectionType": "ALL"}, {}]},
+                    }
+                ],
+            ),
+            "Whole": table(
+                TableName="w", AttributeDefinitions=optional([]), KeySchema={"Ref": "List"}
+            ),
+        },
+        **CONDITION,
+    )
+    assert 'dynamic "attribute" {\n for_each = local.on ? [1] : []' in main
+    assert 'name = "gk"' in main
+    assert main.count("# AttributeDefinitions was not converted") == 2
+    assert main.count("# KeySchema was not converted") == 3
+    assert "# ProvisionedThroughput was not converted" in main
+    assert "# Projection was not converted" in main
+    assert 'projection_type = "ALL"' not in main
+
+
+def test_lifecycle_rule_with_conditional_and_computed_parts():
+    main, notes = convert(
+        {
+            "Cond": bucket_rule(
+                Transitions=[
+                    optional({"StorageClass": "GLACIER", "TransitionInDays": 30}),
+                    {"Ref": "List"},
+                ],
+                NoncurrentVersionTransitions=[
+                    optional({"StorageClass": "GLACIER", "TransitionInDays": 5})
+                ],
+                NoncurrentVersionExpiration=optional({"NoncurrentDays": 5}),
+                AbortIncompleteMultipartUpload=optional({"DaysAfterInitiation": 1}),
+                TagFilters=[{"Key": "a", "Value": "b"}, {"Ref": "List"}],
+            ),
+            "Computed": bucket_rule(
+                Transitions={"Ref": "List"},
+                TagFilters=optional([{"Key": "a", "Value": "b"}]),
+                NoncurrentVersionExpiration={"Ref": "List"},
+                AbortIncompleteMultipartUpload={"Ref": "List"},
+            ),
+        },
+        **CONDITION,
+    )
+    for kind in (
+        "transition",
+        "noncurrent_version_transition",
+        "noncurrent_version_expiration",
+        "abort_incomplete_multipart_upload",
+    ):
+        assert f'dynamic "{kind}" {{\n for_each = local.on ? [1] : []' in main
+    assert "noncurrent_days = null" not in main
+    assert 'tag {\n key = "a"' in main
+    for name in ("Transitions", "TagFilters"):
+        assert main.count(f"# {name} was not converted") == 2
+    assert "# NoncurrentVersionExpiration was not converted" in main
+    assert "# AbortIncompleteMultipartUpload was not converted" in main
+
+
+def test_more_than_a_thousand_lifecycle_rules():
+    rules = [{"Status": "Enabled", "ExpirationInDays": 1}] * 1001
+    main, _ = convert(
+        {
+            "B": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {"LifecycleConfiguration": {"Rules": rules}},
+            }
+        }
+    )
+    assert 'id = "rule-1001"' in main
+
+
+def test_conditional_and_computed_notification_parts():
+    main, notes = convert(
+        {
+            "B": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {
+                    "NotificationConfiguration": {
+                        "QueueConfigurations": [
+                            {
+                                "Event": "e",
+                                "Queue": "arn:q1",
+                                "Filter": {
+                                    "S3Key": {"Rules": optional([{"Name": "prefix", "Value": "a"}])}
+                                },
+                            },
+                            {
+                                "Event": "e",
+                                "Queue": "arn:q2",
+                                "Filter": {
+                                    "S3Key": {
+                                        "Rules": [
+                                            {"Ref": "List"},
+                                            {"Name": "suffix", "Value": ".x"},
+                                        ]
+                                    }
+                                },
+                            },
+                            {"Event": "e", "Queue": "arn:q3", "Filter": {"S3Key": {"Ref": "List"}}},
+                        ],
+                        "EventBridgeConfiguration": optional({"EventBridgeEnabled": True}),
+                    }
+                },
+            },
+            "Computed": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {
+                    "NotificationConfiguration": {
+                        "EventBridgeConfiguration": {
+                            "Fn::If": ["On", {}, {"EventBridgeEnabled": False}]
+                        }
+                    }
+                },
+            },
+            "Plain": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {"NotificationConfiguration": {"EventBridgeConfiguration": {}}},
+            },
+        },
+        **CONDITION,
+    )
+    assert "# Filter.S3Key.Rules was not converted" in main
+    assert 'filter_suffix = ".x"' in main
+    assert "# Filter.S3Key was not converted" in main
+    assert "eventbridge = local.on ? true : false" in main
+    assert "eventbridge = true" in main
+    assert "# EventBridgeConfiguration was not converted" in main
+
+
+def test_conditional_and_computed_ecr_lifecycle_policy():
+    main, notes = convert(
+        {
+            "Cond": {
+                "Type": "AWS::ECR::Repository",
+                "Properties": {
+                    "RepositoryName": "c",
+                    "LifecyclePolicy": optional({"LifecyclePolicyText": '{"rules": []}'}),
+                },
+            },
+            "Registry": {
+                "Type": "AWS::ECR::Repository",
+                "Properties": {
+                    "RepositoryName": "r",
+                    "LifecyclePolicy": {"LifecyclePolicyText": '{"rules": []}', "RegistryId": "1"},
+                },
+            },
+            "Computed": {
+                "Type": "AWS::ECR::Repository",
+                "Properties": {"RepositoryName": "x", "LifecyclePolicy": {"Ref": "List"}},
+            },
+            "OnlyRegistry": {
+                "Type": "AWS::ECR::Repository",
+                "Properties": {"RepositoryName": "o", "LifecyclePolicy": {"RegistryId": "1"}},
+            },
+        },
+        **CONDITION,
+    )
+    lifecycle = main.split('resource "aws_ecr_lifecycle_policy" "cond_lifecycle"')[1]
+    assert lifecycle.startswith(" {\n count = local.on ? 1 : 0")
+    assert main.count('# RegistryId was not converted: "1"') == 2
+    assert any("'Registry.LifecyclePolicy.RegistryId' was not converted" in n for n in notes)
+    assert "# LifecyclePolicy was not converted" in main
+
+
+def test_storage_template_text_cannot_inject_hcl():
+    main, _ = convert(
+        {
+            "B": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {
+                    "BucketName": EVIL,
+                    "LifecycleConfiguration": {
+                        "Rules": [
+                            {
+                                "Id": EVIL,
+                                "Status": EVIL,
+                                "Prefix": EVIL,
+                                "TagFilters": [{"Key": EVIL, "Value": EVIL}],
+                                "Transitions": [{"StorageClass": EVIL, "TransitionInDays": EVIL}],
+                            }
+                        ]
+                    },
+                    "NotificationConfiguration": {
+                        "QueueConfigurations": [
+                            {
+                                "Event": EVIL,
+                                "Queue": EVIL,
+                                "Filter": {"S3Key": {"Rules": [{"Name": "prefix", "Value": EVIL}]}},
+                            }
+                        ],
+                        "EventBridgeConfiguration": {"EventBridgeEnabled": EVIL},
+                    },
+                },
+            },
+            "T": table(
+                TableName=EVIL,
+                AttributeDefinitions=[{"AttributeName": EVIL, "AttributeType": EVIL}],
+                KeySchema=[{"AttributeName": EVIL, "KeyType": "HASH"}],
+                StreamSpecification={"StreamViewType": EVIL},
+                SSESpecification={"SSEEnabled": True, "KMSMasterKeyId": EVIL},
+            ),
+            "R": {
+                "Type": "AWS::ECR::Repository",
+                "Properties": {
+                    "RepositoryName": EVIL,
+                    "LifecyclePolicy": {"LifecyclePolicyText": EVIL},
+                },
+            },
+        }
+    )
+    assert_no_injection(main)

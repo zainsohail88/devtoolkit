@@ -7,6 +7,7 @@ YAML short forms (`!Ref X`, `!GetAtt A.B`, `!Sub ...`) become the long JSON form
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -141,8 +142,14 @@ def _syntax_error(exc: yaml.YAMLError) -> CfnError:
     return CfnError(f"Invalid YAML: {problem}", line, column)
 
 
+# CloudFormation's rule for logical IDs, and for parameter, condition, mapping and output
+# names. Enforcing it also keeps every name safe to use in generated HCL.
+_NAME = re.compile(r"^[A-Za-z0-9]{1,255}$")
+
+
 def _check_shape(data: Any) -> None:
-    """Depth and size limits on loaded data, without recursion."""
+    """Depth and size limits on loaded data, without recursion. Infinite or NaN numbers
+    (YAML `.inf`, `1e400`) are rejected: no CloudFormation value is one."""
     stack: list[tuple[Any, int]] = [(data, 0)]
     count = 0
     while stack:
@@ -152,6 +159,8 @@ def _check_shape(data: Any) -> None:
             raise CfnError(f"Template too large: more than {MAX_NODES:,} values")
         if depth > MAX_DEPTH:
             raise CfnError("Template nested too deeply")
+        if isinstance(node, float) and not math.isfinite(node):
+            raise CfnError(f"Invalid number in template: {node}")
         if isinstance(node, dict):
             stack.extend((k, depth + 1) for k in node)
             stack.extend((v, depth + 1) for v in node.values())
@@ -227,6 +236,13 @@ def validate_template(data: Any) -> None:
     for name, output in (data.get("Outputs") or {}).items():
         if not isinstance(output, dict) or "Value" not in output:
             raise CfnError(f"Invalid template: output '{name}' needs a 'Value'")
+    for section in ("Resources", "Parameters", "Conditions", "Mappings", "Outputs"):
+        for name in data.get(section) or {}:
+            if not isinstance(name, str) or not _NAME.match(name):
+                raise CfnError(
+                    f"Invalid template: '{name}' in {section} must be letters and digits only "
+                    "(A-Z, a-z, 0-9)"
+                )
 
 
 def transforms(template: dict[str, Any]) -> list[str]:

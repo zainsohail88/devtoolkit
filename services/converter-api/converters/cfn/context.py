@@ -24,6 +24,9 @@ PSEUDO_DATA = {
     "AWS::Partition": ("aws_partition", "current", "partition"),
     "AWS::URLSuffix": ("aws_partition", "current", "dns_suffix"),
 }
+# CloudFormation's own limit on the number of CIDR blocks Fn::Cidr returns.
+_MAX_CIDR_COUNT = 256
+_ATTRIBUTE = re.compile(r"^[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
 _SUB_VARIABLE = re.compile(r"\$\{([^}]*)\}")
 # Operands that need no parentheses: a reference, a number, a quoted string, a call with
 # simple arguments, or a negation of one of those.
@@ -96,9 +99,14 @@ class Context:
         self.variable_names = UniqueNames()
         self.local_names = UniqueNames()
         self.output_names = UniqueNames()
+        # Terraform names per resource or data source type, so the extra resources a
+        # converter adds can't collide with each other or with converted resources.
+        self.type_names: dict[str, UniqueNames] = {}
         # Always available for AWS::StackName, so no parameter can take the name.
         self.variable_names.reserve("stack_name")
         self.stack_name_used = False
+        # Above 0 while a JSON document (jsonencode) is being converted.
+        self.json_depth = 0
         self.parameter_types = {
             name: str(spec.get("Type"))
             for name, spec in (template.get("Parameters") or {}).items()
@@ -112,6 +120,9 @@ class Context:
         if message not in self._note_set:
             self._note_set.add(message)
             self.notes.append(message)
+
+    def names_for(self, kind: str) -> UniqueNames:
+        return self.type_names.setdefault(kind, UniqueNames())
 
     # --- data sources and variables created by references ------------------------------
 
@@ -146,10 +157,52 @@ class Context:
             function = intrinsic_name(value)
             if function is not None:
                 return self._intrinsic(function, value[function], depth + 1)
-            return {str(k): self.expr(v, depth + 1) for k, v in value.items()}
+            return self._mapping(value, depth)
         if isinstance(value, list):
-            return [self.expr(item, depth + 1) for item in value]
+            return self._list(value, depth)
         return value
+
+    def _mapping(self, value: dict[Any, Any], depth: int) -> Any:
+        """A mapping, without the keys CloudFormation removes: those set to AWS::NoValue,
+        and `!If [Cond, x, !Ref AWS::NoValue]` ones when the condition picks NoValue."""
+        fixed: dict[str, Any] = {}
+        optional: list[str] = []
+        for key, item in value.items():
+            if self.is_no_value(item):
+                continue
+            condition, present = self.optional_item(item)
+            if condition is None:
+                fixed[str(key)] = self.expr(item, depth + 1)
+            else:
+                entry = hcl.inline({str(key): self.expr(present, depth + 1)})
+                optional.append(f"{condition} ? {entry} : {{}}")
+        if not optional:
+            return fixed
+        return Raw(f"merge({', '.join([hcl.inline(fixed), *optional])})")
+
+    def _list(self, items: list[Any], depth: int) -> Any:
+        """A list, without the items CloudFormation removes: `!Ref AWS::NoValue`, and
+        `!If [Cond, x, !Ref AWS::NoValue]` when the condition picks NoValue."""
+        kept = [item for item in items if not self.is_no_value(item)]
+        converted = [self.expr(item, depth + 1) for item in kept]
+        if not any(self.optional_item(item)[0] for item in kept):
+            return converted
+        return Raw(f"[for item in {hcl.inline(converted)} : item if item != null]")
+
+    def optional_item(self, item: Any) -> tuple[str | None, Any]:
+        """For `!If [Cond, x, !Ref AWS::NoValue]` (or with the branches swapped): the
+        condition under which the item exists, and x. Otherwise (None, item)."""
+        if not (isinstance(item, dict) and intrinsic_name(item) == "Fn::If"):
+            return None, item
+        args = item["Fn::If"]
+        if not isinstance(args, list) or len(args) != 3:
+            return None, item
+        name, yes, no = args
+        if self.is_no_value(no) and not self.is_no_value(yes):
+            return self.condition(name), yes
+        if self.is_no_value(yes) and not self.is_no_value(no):
+            return f"!{self.condition(name)}", no
+        return None, item
 
     def text(self, value: Any) -> str:
         """An expression's source text on one line."""
@@ -225,6 +278,8 @@ class Context:
             return Raw(self._unresolved(info, attribute, f"the '{attribute}' attribute"))
         if attribute in info.attrs:
             return Raw(info.expression(info.attrs[attribute]))
+        if not _ATTRIBUTE.match(attribute):
+            raise CfnError(f"'Fn::GetAtt' attribute '{attribute}' of '{logical_id}' is not valid")
         tf_attribute = ".".join(snake(part) for part in attribute.split("."))
         if info.kind == "aws":
             self.note(
@@ -285,18 +340,47 @@ def _fn_condition(ctx: Context, args: Any, depth: int) -> Any:
     return Raw(ctx.condition(args))
 
 
-def _template_part(ctx: Context, value: Any, depth: int) -> str:
-    """One piece of a template string: literal text, or an interpolation."""
-    if isinstance(value, str):
-        return hcl.template_text(value)
+def _scalar_text(value: Any) -> str:
+    """A literal as CloudFormation turns it into text: true, 1.5, abc."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int | float):
         return hcl.render(value)
-    rendered = ctx.expr(value, depth + 1)
-    if isinstance(rendered, str):
-        return hcl.template_text(rendered)
-    return "${" + hcl.inline(rendered) + "}"
+    return str(value)
+
+
+_TRAILING_MARKERS = re.compile(r"[$%]+$")
+
+
+def _template(pieces: list[Any]) -> Any:
+    """Literal strings and HCL values as one value: the text itself when every piece is
+    literal, the value when there is only one, otherwise a template string.
+
+    Literal runs are joined before they are escaped, so text split across pieces ("$" then
+    "{x}") can't form an interpolation, and a "$" or "%" right before an interpolation is
+    written as ${"$"}, because "$${" would escape it."""
+    merged: list[Any] = []
+    for piece in pieces:
+        if isinstance(piece, str) and merged and isinstance(merged[-1], str):
+            merged[-1] += piece
+        elif piece != "":
+            merged.append(piece)
+    if not merged:
+        return ""
+    if len(merged) == 1:
+        return merged[0]
+    out: list[str] = []
+    for index, piece in enumerate(merged):
+        if not isinstance(piece, str):
+            out.append("${" + hcl.inline(piece) + "}")
+            continue
+        markers = _TRAILING_MARKERS.search(piece)
+        if markers and index + 1 < len(merged):
+            out.append(hcl.template_text(piece[: markers.start()]))
+            out.append("${" + hcl.quote(markers.group()) + "}")
+        else:
+            out.append(hcl.template_text(piece))
+    return Raw('"' + "".join(out) + '"')
 
 
 def _fn_sub(ctx: Context, args: Any, depth: int) -> Any:
@@ -327,36 +411,30 @@ def _fn_sub(ctx: Context, args: Any, depth: int) -> Any:
     if position < len(args):
         pieces.append(("text", args[position:]))
 
-    if len(pieces) == 1 and pieces[0][0] == "expr":
-        return pieces[0][1]
-    if all(kind == "text" for kind, _ in pieces):
-        return "".join(text for _, text in pieces)
-    out = []
-    for kind, value in pieces:
-        if kind == "text":
-            out.append(hcl.template_text(value))
-        elif isinstance(value, str):
-            out.append(hcl.template_text(value))
-        else:
-            out.append("${" + hcl.inline(value) + "}")
-    return Raw('"' + "".join(out) + '"')
+    return _template([value for _, value in pieces])
 
 
 def _fn_join(ctx: Context, args: Any, depth: int) -> Any:
     delimiter, items = _args(args, 2, "Fn::Join")
     if isinstance(items, list):
-        if all(isinstance(item, str | int | float) for item in items) and isinstance(
-            delimiter, str
-        ):
-            return delimiter.join(str(item) for item in items)
-        if isinstance(delimiter, str) and not any(
+        # CloudFormation leaves out AWS::NoValue items, and their delimiter with them.
+        items = [item for item in items if not ctx.is_no_value(item)]
+        optional = any(ctx.optional_item(item)[0] for item in items)
+        listed = any(
             isinstance(item, dict) and intrinsic_name(item) in ("Fn::GetAZs", "Fn::Split")
             for item in items
-        ):
+        )
+        if isinstance(delimiter, str) and not optional and not listed:
             # A template string reads better than join() when every item is one value.
-            separator = hcl.template_text(delimiter)
-            parts = [_template_part(ctx, item, depth) for item in items]
-            return Raw('"' + separator.join(parts) + '"')
+            pieces: list[Any] = []
+            for index, item in enumerate(items):
+                if index:
+                    pieces.append(delimiter)
+                if isinstance(item, str | int | float):
+                    pieces.append(_scalar_text(item))
+                else:
+                    pieces.append(ctx.expr(item, depth + 1))
+            return _template(pieces)
     return Raw(f"join({hcl.inline(ctx.expr(delimiter, depth))}, {ctx.text(items)})")
 
 
@@ -395,6 +473,8 @@ def _fn_cidr(ctx: Context, args: Any, depth: int) -> Any:
         bits_value = int(bits)
     except (TypeError, ValueError):
         count_value = bits_value = -1
+    if count_value > _MAX_CIDR_COUNT:
+        raise CfnError(f"'Fn::Cidr' can make at most {_MAX_CIDR_COUNT} blocks")
     if isinstance(block, str) and count_value > 0 and bits_value > 0:
         try:
             network = ipaddress.ip_network(block, strict=False)
@@ -410,7 +490,8 @@ def _fn_cidr(ctx: Context, args: Any, depth: int) -> Any:
     block_text = hcl.inline(ctx.expr(block, depth))
     count_text = hcl.inline(ctx.expr(count, depth))
     bits_text = hcl.inline(ctx.expr(bits, depth))
-    newbits = f'32 - {_wrap(bits_text)} - tonumber(split("/", {block_text})[1])'
+    size = f'(strcontains({block_text}, ":") ? 128 : 32)'
+    newbits = f'{size} - {_wrap(bits_text)} - tonumber(split("/", {block_text})[1])'
     return Raw(f"[for i in range({count_text}) : cidrsubnet({block_text}, {newbits}, i)]")
 
 
@@ -440,6 +521,10 @@ def _fn_if(ctx: Context, args: Any, depth: int) -> Any:
     condition = ctx.condition(name)
     yes = hcl.inline(ctx.expr(when_true, depth))
     no = hcl.inline(ctx.expr(when_false, depth))
+    if ctx.json_depth and not (isinstance(when_true, str) and isinstance(when_false, str)):
+        # Inside a JSON document the branches may differ in shape (a string or a list of
+        # them); a conditional needs one type, so each branch is encoded on its own.
+        return Raw(f"jsondecode({condition} ? jsonencode({yes}) : jsonencode({no}))")
     return Raw(f"{condition} ? {yes} : {no}")
 
 
@@ -452,15 +537,17 @@ def _number_param(ctx: Context, value: Any) -> bool:
 
 
 def _fn_equals(ctx: Context, args: Any, depth: int) -> Any:
+    """CloudFormation compares as text, while Terraform never treats 2 and "2", or true and
+    "true", as equal: literals become strings and Number parameters go through tostring()."""
     left, right = _args(args, 2, "Fn::Equals")
     texts = []
-    for side, other in ((left, right), (right, left)):
-        text = hcl.inline(ctx.expr(side, depth))
-        # CloudFormation compares as strings; Terraform never treats 2 and "2" as equal.
-        if _number_param(ctx, side) and isinstance(other, str):
-            text = f"tostring({text})"
-        elif isinstance(side, int | float) and not isinstance(side, bool):
-            text = hcl.quote(str(side))
+    for side in (left, right):
+        if isinstance(side, bool | int | float):
+            text = hcl.quote(_scalar_text(side))
+        else:
+            text = hcl.inline(ctx.expr(side, depth))
+            if _number_param(ctx, side):
+                text = f"tostring({text})"
         texts.append(text)
     return Raw(f"{_wrap(texts[0])} == {_wrap(texts[1])}")
 
@@ -544,16 +631,38 @@ def json_value(ctx: Context, value: Any) -> Any:
     `jsonencode({...})`, or the string itself when it is already JSON text."""
     if isinstance(value, str):
         try:
-            parsed = json.loads(value)
-        except ValueError:
+            value = json.loads(value)
+        except (ValueError, RecursionError):
             return value
-        return hcl.Call("jsonencode", ctx.expr(parsed))
-    converted = ctx.expr(value)
+        _check_json_depth(value)
     function = intrinsic_name(value) if isinstance(value, dict) else None
     if function in _STRING_FUNCTIONS:
         # Ref, Sub and the like give text, which is already a JSON document.
-        return converted
-    return hcl.Call("jsonencode", converted)
+        return ctx.expr(value)
+    if function == "Fn::If":
+        name, yes, no = _args(value[function], 3, "Fn::If")
+        branches = [
+            "null" if ctx.is_no_value(branch) else hcl.inline(json_value(ctx, branch))
+            for branch in (yes, no)
+        ]
+        return Raw(f"{ctx.condition(name)} ? {branches[0]} : {branches[1]}")
+    ctx.json_depth += 1
+    try:
+        return hcl.Call("jsonencode", ctx.expr(value))
+    finally:
+        ctx.json_depth -= 1
+
+
+def _check_json_depth(value: Any) -> None:
+    stack = [(value, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > 100:
+            raise CfnError("A JSON document in the template is nested too deeply")
+        if isinstance(node, dict):
+            stack.extend((v, depth + 1) for v in node.values())
+        elif isinstance(node, list):
+            stack.extend((v, depth + 1) for v in node)
 
 
 _STRING_FUNCTIONS = {

@@ -826,3 +826,470 @@ def test_refers_to_reference_forms():
     assert _refers_to({"Fn::GetAtt": ["Sg", "GroupId"]}, "Sg")
     assert not _refers_to("sg-123", "Sg")
     assert not _refers_to({"Fn::GetAtt": []}, "Sg")
+
+
+# --- regressions --------------------------------------------------------------------------
+
+NO = {"Ref": "AWS::NoValue"}
+ENV = {
+    "Parameters": {"Env": {"Type": "String"}},
+    "Conditions": {"On": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}},
+}
+
+
+def _if(yes: object, no: object = NO) -> dict:
+    return {"Fn::If": ["On", yes, no]}
+
+
+def _group(**props: object) -> dict:
+    return {
+        "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {"GroupDescription": "d", "VpcId": "vpc-1", **props},
+    }
+
+
+SSH = {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "CidrIp": "10.0.0.0/8"}
+HTTPS = {"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443, "CidrIp": "0.0.0.0/0"}
+ALLOW_ALL = 'from_port = 0 to_port = 0 protocol = "-1" cidr_blocks = ["0.0.0.0/0"]'
+
+
+def test_standalone_rules_from_optional_items_are_counted():
+    hcl, notes = convert(
+        {
+            "Sg": _group(SecurityGroupIngress=[_if(SSH), NO, _if(SSH, HTTPS)]),
+            "Self": {
+                "Type": "AWS::EC2::SecurityGroupIngress",
+                "Properties": {
+                    "GroupId": {"Ref": "Sg"},
+                    "IpProtocol": "-1",
+                    "SourceSecurityGroupId": {"Ref": "Sg"},
+                },
+            },
+        },
+        **ENV,
+    )
+    assert (
+        'resource "aws_vpc_security_group_ingress_rule" "sg_ingress_1" { count = local.on ? 1 : 0'
+        in hcl
+    )
+    assert 'cidr_ipv4 = "10.0.0.0/8"' in hcl
+    assert "sg_ingress_2" not in hcl and "sg_ingress_3" not in hcl
+    assert "ingress[2] was not converted" in hcl
+    assert any("'Sg.ingress[2]' is computed by a function" in n for n in notes)
+
+
+def test_default_egress_kept_when_the_egress_rules_are_optional():
+    hcl, notes = convert(
+        {
+            "Inline": _group(SecurityGroupEgress=_if([HTTPS])),
+            "Single": _group(SecurityGroupEgress=_if(HTTPS)),
+            "Swapped": _group(SecurityGroupEgress=_if(NO, [HTTPS])),
+            "Computed": _group(SecurityGroupEgress=_if([HTTPS], [SSH])),
+            "Odd": _group(SecurityGroupEgress={"Fn::If": "odd"}),
+            "Standalone": _group(SecurityGroupEgress=_if([HTTPS])),
+            "Rule": {
+                "Type": "AWS::EC2::SecurityGroupIngress",
+                "Properties": {
+                    "GroupId": {"Ref": "Standalone"},
+                    "IpProtocol": "-1",
+                    "CidrIp": "10.0.0.0/8",
+                },
+            },
+        },
+        **ENV,
+    )
+    inline = hcl.split('resource "aws_security_group" "inline"')[1].split('resource "')[0]
+    assert 'dynamic "egress" { for_each = local.on ? [1] : [] content { from_port = 443' in inline
+    assert f'dynamic "egress" {{ for_each = !local.on ? [1] : [] content {{ {ALLOW_ALL}' in inline
+    assert "CloudFormation adds this allow-all egress rule" in inline
+    single = hcl.split('resource "aws_security_group" "single"')[1].split('resource "')[0]
+    assert "for_each = !local.on ? [1] : []" in single
+    swapped = hcl.split('resource "aws_security_group" "swapped"')[1].split('resource "')[0]
+    assert "for_each = !local.on ? [1] : [] content { from_port = 443" in swapped
+    assert f"for_each = local.on ? [1] : [] content {{ {ALLOW_ALL}" in swapped
+    computed = hcl.split('resource "aws_security_group" "computed"')[1].split('resource "')[0]
+    assert "Egress was not converted" in computed
+    assert (
+        'resource "aws_vpc_security_group_egress_rule" "standalone_egress_1" '
+        "{ count = local.on ? 1 : 0 security_group_id = aws_security_group.standalone.id "
+        'ip_protocol = "tcp"'
+    ) in hcl
+    assert (
+        'resource "aws_vpc_security_group_egress_rule" "standalone_egress_2" { count = !local.on '
+        "? 1 : 0 # CloudFormation adds this allow-all egress rule when the template has none; "
+        "# Terraform removes it, so it is written out. security_group_id = "
+        'aws_security_group.standalone.id ip_protocol = "-1" cidr_ipv4 = "0.0.0.0/0" }'
+    ) in hcl
+    assert any("Computed.Egress' is computed by a function" in n for n in notes)
+    assert any("Odd.Egress' is computed by a function" in n for n in notes)
+
+
+def _target_group(attributes: list, **props: object) -> dict:
+    return {
+        "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+        "Properties": {
+            "Port": 80,
+            "Protocol": "HTTP",
+            "VpcId": "vpc-1",
+            "TargetGroupAttributes": [{"Key": k, "Value": v} for k, v in attributes],
+            **props,
+        },
+    }
+
+
+def test_target_group_stickiness_defaults_and_cookie_durations():
+    hcl, notes = convert(
+        {
+            "Lb": _target_group([("stickiness.lb_cookie.duration_seconds", "3600")]),
+            "App": _target_group(
+                [
+                    ("stickiness.enabled", "true"),
+                    ("stickiness.type", "app_cookie"),
+                    ("stickiness.app_cookie.cookie_name", "SESS"),
+                    ("stickiness.app_cookie.duration_seconds", "600"),
+                    ("stickiness.lb_cookie.duration_seconds", "3600"),
+                ]
+            ),
+        }
+    )
+    assert 'stickiness { enabled = false cookie_duration = 3600 type = "lb_cookie" }' in hcl
+    assert (
+        'stickiness { enabled = true type = "app_cookie" cookie_name = "SESS" '
+        "cookie_duration = 600 }"
+    ) in hcl
+    assert 'TargetGroupAttributes "stickiness.lb_cookie.duration_seconds" = "3600" was not' in hcl
+    assert any("'stickiness.lb_cookie.duration_seconds' was not converted" in n for n in notes)
+
+
+def test_partial_health_check_gets_the_aws_thresholds():
+    hcl, _ = convert(
+        {
+            "Web": _target_group([], HealthCheckPath="/health"),
+            "Tuned": _target_group([], HealthyThresholdCount=3, UnhealthyThresholdCount=4),
+            "Fn": {
+                "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+                "Properties": {"TargetType": "lambda", "HealthCheckEnabled": True},
+            },
+            "Geneve": _target_group([], Protocol="GENEVE", Port=6081, HealthCheckPort="80"),
+            "Plain": _target_group([]),
+        }
+    )
+    assert 'health_check { path = "/health" healthy_threshold = 5 unhealthy_threshold = 2 }' in hcl
+    assert "health_check { healthy_threshold = 3 unhealthy_threshold = 4 }" in hcl
+    assert (
+        "health_check { enabled = true healthy_threshold = 5 unhealthy_threshold = 5 "
+        "interval = 35 }"
+    ) in hcl
+    assert "health_check" in hcl
+    assert 'port = "80" healthy_threshold = 5 unhealthy_threshold = 2 interval = 10 }' in hcl
+    assert hcl.count("health_check {") == 4
+
+
+def test_forward_config_stickiness_is_kept():
+    hcl, notes = convert(
+        {
+            "Listener": {
+                "Type": "AWS::ElasticLoadBalancingV2::Listener",
+                "Properties": {
+                    "LoadBalancerArn": "arn:lb",
+                    "Port": 80,
+                    "Protocol": "HTTP",
+                    "DefaultActions": [
+                        {
+                            "Type": "forward",
+                            "TargetGroupArn": "arn:tg",
+                            "ForwardConfig": {
+                                "TargetGroups": [{"TargetGroupArn": "arn:tg"}],
+                                "TargetGroupStickinessConfig": {
+                                    "Enabled": True,
+                                    "DurationSeconds": 300,
+                                },
+                            },
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    assert (
+        'default_action { type = "forward" forward { target_group { arn = "arn:tg" } '
+        "stickiness { enabled = true duration = 300 } } }"
+    ) in hcl
+    assert "target_group_arn" not in hcl
+    assert notes == []
+
+
+def test_lists_from_functions_do_not_crash():
+    lambda_arn = "arn:aws:lambda:us-east-1:123456789012:function:f:1"
+    hcl, notes = convert(
+        {
+            "Dist": {
+                "Type": "AWS::CloudFront::Distribution",
+                "Properties": {
+                    "DistributionConfig": {
+                        "Enabled": True,
+                        "Origins": [
+                            {
+                                "Id": "web",
+                                "DomainName": "example.com",
+                                "OriginCustomHeaders": _if(
+                                    [{"HeaderName": "X", "HeaderValue": "1"}]
+                                ),
+                                "CustomOriginConfig": {
+                                    "OriginProtocolPolicy": "https-only",
+                                    "OriginSSLProtocols": ["TLSv1.2"],
+                                },
+                            },
+                            {
+                                "Id": "b",
+                                "DomainName": "b.example.com",
+                                "S3OriginConfig": {"Ref": "S3"},
+                            },
+                        ],
+                        "OriginGroups": {
+                            "Quantity": 2,
+                            "Items": [
+                                {
+                                    "Id": "g",
+                                    "FailoverCriteria": {"StatusCodes": {"Ref": "Codes"}},
+                                    "Members": {"Quantity": 1, "Items": {"Ref": "Members"}},
+                                },
+                                {
+                                    "Id": "h",
+                                    "FailoverCriteria": {
+                                        "StatusCodes": {"Quantity": 1, "Items": [500]}
+                                    },
+                                    "Members": {"Quantity": 1, "Items": [{"OriginId": "web"}]},
+                                },
+                            ],
+                        },
+                        "DefaultCacheBehavior": {
+                            "TargetOriginId": "web",
+                            "ViewerProtocolPolicy": "allow-all",
+                            "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+                            "LambdaFunctionAssociations": _if(
+                                [{"EventType": "viewer-request", "LambdaFunctionARN": lambda_arn}]
+                            ),
+                            "FunctionAssociations": {"Ref": "Functions"},
+                        },
+                    }
+                },
+            },
+            "Rule": {
+                "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+                "Properties": {
+                    "ListenerArn": "arn:listener",
+                    "Priority": 1,
+                    "Conditions": [
+                        {
+                            "Field": "query-string",
+                            "QueryStringConfig": {"Values": {"Ref": "Query"}},
+                        },
+                        {
+                            "Field": "query-string",
+                            "QueryStringConfig": {"Values": [{"Value": "v"}]},
+                        },
+                        {"Field": "host-header", "HostHeaderConfig": {"Ref": "Hosts"}},
+                    ],
+                    "Actions": [
+                        {
+                            "Type": "forward",
+                            "ForwardConfig": {
+                                "TargetGroups": _if(
+                                    [{"TargetGroupArn": "arn:a"}], [{"TargetGroupArn": "arn:b"}]
+                                )
+                            },
+                        }
+                    ],
+                },
+            },
+        },
+        Parameters={
+            "Env": {"Type": "String"},
+            **{
+                name: {"Type": "String"}
+                for name in ("S3", "Codes", "Members", "Functions", "Query", "Hosts")
+            },
+        },
+        Conditions=ENV["Conditions"],
+    )
+    assert (
+        'dynamic "custom_header" { for_each = local.on ? [1] : [] content { name = "X" '
+        'value = "1" } }'
+    ) in hcl
+    assert "custom_header" in hcl
+    assert (
+        'dynamic "lambda_function_association" { for_each = local.on ? [1] : [] content { '
+        f'event_type = "viewer-request" lambda_arn = "{lambda_arn}" }} }}'
+    ) in hcl
+    assert 'query_string { value = "v" }' in hcl
+    assert 'failover_criteria { status_codes = [500] } member { origin_id = "web" }' in hcl
+    for text in (
+        "FunctionAssociations was not converted",
+        "S3OriginConfig was not converted",
+        "StatusCodes was not converted",
+        "Members.Items was not converted",
+        "Values was not converted",
+        "HostHeaderConfig was not converted",
+        "TargetGroups was not converted",
+    ):
+        assert text in hcl
+    assert any("computed by a function" in n for n in notes)
+
+
+def test_distribution_http_version_and_zone_comment_defaults():
+    hcl, _ = convert(
+        {
+            "Dist": {
+                "Type": "AWS::CloudFront::Distribution",
+                "Properties": {
+                    "DistributionConfig": {
+                        "Enabled": True,
+                        "Origins": [
+                            {"Id": "web", "DomainName": "example.com", "S3OriginConfig": {}}
+                        ],
+                        "DefaultCacheBehavior": {
+                            "TargetOriginId": "web",
+                            "ViewerProtocolPolicy": "allow-all",
+                            "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+                        },
+                    }
+                },
+            },
+            "Zone": {"Type": "AWS::Route53::HostedZone", "Properties": {"Name": "example.com"}},
+        }
+    )
+    assert 'http_version = "http1.1"' in hcl
+    assert 'resource "aws_route53_zone" "zone" { name = "example.com" comment = "" }' in hcl
+
+
+def test_load_balancer_scheme_from_a_condition_is_compared_whole():
+    hcl, _ = convert(
+        {
+            "Lb": {
+                "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                "Properties": {
+                    "Scheme": _if("internal", "internet-facing"),
+                    "Subnets": ["subnet-1"],
+                },
+            }
+        },
+        **ENV,
+    )
+    assert 'internal = (local.on ? "internal" : "internet-facing") == "internal"' in hcl
+
+
+PAYLOAD = (
+    'x"\n}\nresource "terraform_data" "pwn" {\n  provisioner "local-exec" { command = "id" }\n'
+    '}\n# ${file("/etc/passwd")}\r'
+)
+
+
+def _assert_inert(content: str) -> None:
+    """No line of the payload became HCL: every injected line is inside a quoted string or a
+    comment, and `${` outside comments is escaped as `$${`."""
+    for line in content.split("\n"):
+        code = line.strip()
+        if code.startswith("#"):
+            continue
+        assert not code.startswith(('resource "terraform_data"', "provisioner"))
+        assert line.replace("$${", "").count("${file") == 0, line
+
+
+def test_template_text_cannot_inject_hcl():
+    """Strings from the template end up quoted and escaped, also in comments and names."""
+    template = {
+        "Resources": {
+            "Tg": _target_group([(PAYLOAD, "1"), ("stickiness.type", PAYLOAD)]),
+            "Rule": {
+                "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+                "Properties": {
+                    "ListenerArn": "arn:listener",
+                    "Priority": 1,
+                    "Conditions": [
+                        {"Field": PAYLOAD},
+                        {
+                            "Field": "query-string",
+                            "QueryStringConfig": {"Values": [{"Key": PAYLOAD, "Value": PAYLOAD}]},
+                        },
+                    ],
+                    "Actions": [{"Type": "forward", "TargetGroupArn": PAYLOAD}],
+                },
+            },
+            "Db": {
+                "Type": "AWS::RDS::DBInstance",
+                "Properties": {
+                    "Engine": "postgres",
+                    "DBInstanceClass": "db.t4g.micro",
+                    "DBInstanceIdentifier": PAYLOAD,
+                },
+            },
+            "Member": {
+                "Type": "AWS::RDS::DBInstance",
+                "Properties": {
+                    "Engine": "aurora-postgresql",
+                    "DBInstanceClass": "db.serverless",
+                    "DBClusterIdentifier": PAYLOAD,
+                    "DBInstanceIdentifier": {"Fn::Sub": PAYLOAD.replace("${", "${!")},
+                },
+            },
+            "Params": {
+                "Type": "AWS::RDS::DBParameterGroup",
+                "Properties": {
+                    "Family": "postgres16",
+                    "Description": PAYLOAD,
+                    "DBParameterGroupName": PAYLOAD,
+                    "Parameters": {PAYLOAD: PAYLOAD},
+                },
+            },
+            "Cert": {
+                "Type": "AWS::CertificateManager::Certificate",
+                "Properties": {
+                    "DomainName": PAYLOAD,
+                    "ValidationMethod": "DNS",
+                    "DomainValidationOptions": [
+                        {"DomainName": PAYLOAD, "HostedZoneId": "Z1"},
+                        {"DomainName": "b" + PAYLOAD, "HostedZoneId": PAYLOAD},
+                    ],
+                },
+            },
+            "Record": {
+                "Type": "AWS::Route53::RecordSet",
+                "Properties": {"HostedZoneName": PAYLOAD, "Name": PAYLOAD, "Type": "A", "TTL": 60},
+            },
+            "Machine": {
+                "Type": "AWS::StepFunctions::StateMachine",
+                "Properties": {
+                    "RoleArn": "arn:role",
+                    "Definition": {"StartAt": PAYLOAD, "States": {PAYLOAD: {"Comment": "${Name}"}}},
+                    "DefinitionSubstitutions": {"Name": PAYLOAD},
+                },
+            },
+            "Policy": {
+                "Type": "AWS::IAM::Policy",
+                "Properties": {
+                    "PolicyName": PAYLOAD,
+                    "PolicyDocument": {"Statement": [{"Sid": PAYLOAD}]},
+                    "Roles": [PAYLOAD, {"Fn::If": ["On", PAYLOAD, NO]}],
+                },
+            },
+            "Alarm": {
+                "Type": "AWS::CloudWatch::Alarm",
+                "Properties": {
+                    "AlarmName": PAYLOAD,
+                    "ComparisonOperator": "GreaterThanThreshold",
+                    "EvaluationPeriods": 1,
+                    "Threshold": 1,
+                    "MetricName": PAYLOAD,
+                    "Namespace": PAYLOAD,
+                    "Period": 60,
+                    "Statistic": "Sum",
+                    "Dimensions": [{"Name": PAYLOAD, "Value": PAYLOAD}],
+                },
+            },
+        },
+        **ENV,
+    }
+    result = convert_template(yaml.safe_dump(template, sort_keys=False), stack_name="demo")
+    for file in result["files"]:
+        _assert_inert(file["content"])

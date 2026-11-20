@@ -6,10 +6,11 @@ from collections.abc import Callable
 from typing import Any
 
 from converters.cfn import hcl
-from converters.cfn.builder import Builder, Props
+from converters.cfn.builder import Builder, Props, snippet
 from converters.cfn.context import Context, ResourceInfo, intrinsic_name
 from converters.cfn.hcl import Attr, Block, Raw
 from converters.cfn.resources import resource
+from converters.cfn.resources.messaging import operand
 
 # --- helpers ----------------------------------------------------------------------------
 
@@ -46,6 +47,16 @@ def _as_list(ctx: Context, value: Any) -> Any:
     if isinstance(value, dict) and intrinsic_name(value) in ("Fn::GetAZs", "Fn::Split"):
         return converted
     return [converted]
+
+
+def _blocks(p: Props, tf_name: str, cfn_name: str, fill: Callable[[Props], None]) -> None:
+    """A list of structures as blocks, like Props.block, where `!If [Cond, [...],
+    !Ref AWS::NoValue]` around the whole list gives one conditional block per item."""
+    value = p.take(cfn_name)
+    if value is None:
+        return
+    items, _ = _split_if(p.ctx, value)
+    p.add_blocks(tf_name, items, fill, f"{p.where}.{cfn_name}")
 
 
 def _sub(p: Props, value: Any, name: str) -> Props:
@@ -381,25 +392,56 @@ def security_group(b: Builder) -> None:
     p.attr("description", "GroupDescription")
     p.attr("vpc_id", "VpcId")
     p.tags()
-    ingress = p.take("SecurityGroupIngress")
-    egress = p.take("SecurityGroupEgress")
-    default_egress = egress is None
-    if default_egress:
-        egress = [_ALLOW_ALL_EGRESS]
+    ingress, _ = _split_if(b.ctx, p.take("SecurityGroupIngress"))
+    egress, absent = _split_if(b.ctx, p.take("SecurityGroupEgress"))
+    # The rule CloudFormation keeps when the template sets no egress (or, for
+    # `!If [Cond, [...], !Ref AWS::NoValue]`, when the condition picks NoValue).
+    default: Any = None
+    if egress is None:
+        default = _ALLOW_ALL_EGRESS
+        egress = [default]
+    elif absent is not None:
+        default = absent(_ALLOW_ALL_EGRESS)
+        egress = [*egress, default]
 
     if _has_standalone_rules(b.ctx, b.logical_id):
         # Inline rules and separate rule resources on one group overwrite each other in
         # Terraform, so this group's own rules become separate resources too.
-        _standalone_rules(b, ingress, egress, default_egress)
+        _standalone_rules(b, ingress, egress, default)
         return
     if ingress is not None:
         p.add_blocks("ingress", ingress, lambda r: _inline_rule(r, False), f"{p.where}.Ingress")
-    if default_egress:
-        p.comment(_EGRESS_COMMENT)
-    p.add_blocks("egress", egress, lambda r: _inline_rule(r, True), f"{p.where}.Egress")
+    for rule in egress if isinstance(egress, list) else [egress]:
+        if rule is default:
+            p.comment(_EGRESS_COMMENT)
+        p.add_blocks("egress", rule, lambda r: _inline_rule(r, True), f"{p.where}.Egress")
 
 
-def _standalone_rules(b: Builder, ingress: Any, egress: Any, default_egress: bool) -> None:
+def _split_if(ctx: Context, rules: Any) -> tuple[Any, Callable[[Any], Any] | None]:
+    """`!If [Cond, [rules], !Ref AWS::NoValue]` (either way round) as one `!If` per rule, so
+    each becomes a conditional block or resource. Also returns how to wrap a rule that holds
+    only when the property is absent. Anything else is returned as it is (and None)."""
+    if not (isinstance(rules, dict) and intrinsic_name(rules) == "Fn::If"):
+        return rules, None
+    args = rules["Fn::If"]
+    if not isinstance(args, list) or len(args) != 3:
+        return rules, None
+    name, yes, no = args
+    no_value = {"Ref": "AWS::NoValue"}
+    if ctx.is_no_value(no) and not ctx.is_no_value(yes):
+        present = yes if isinstance(yes, list) else [yes]
+        return [{"Fn::If": [name, rule, no_value]} for rule in present], (
+            lambda rule: {"Fn::If": [name, no_value, rule]}
+        )
+    if ctx.is_no_value(yes) and not ctx.is_no_value(no):
+        present = no if isinstance(no, list) else [no]
+        return [{"Fn::If": [name, no_value, rule]} for rule in present], (
+            lambda rule: {"Fn::If": [name, rule, no_value]}
+        )
+    return rules, None
+
+
+def _standalone_rules(b: Builder, ingress: Any, egress: Any, default: Any) -> None:
     for kind, rules, is_egress in (("ingress", ingress, False), ("egress", egress, True)):
         if rules is None:
             continue
@@ -409,15 +451,30 @@ def _standalone_rules(b: Builder, ingress: Any, egress: Any, default_egress: boo
                 "turned into rule resources; add them by hand"
             )
             continue
-        for number, rule in enumerate(rules, start=1):
-            inner = Props(b.ctx, rule, f"{b.logical_id}.{kind}[{number - 1}]", b.props.owner)
+        for number, item in enumerate(rules, start=1):
+            if b.ctx.is_no_value(item):
+                continue
+            where = f"{b.logical_id}.{kind}[{number - 1}]"
+            # `!If [Cond, {...}, !Ref AWS::NoValue]`: a rule resource counted on Cond.
+            when, rule = b.ctx.optional_item(item)
+            if not isinstance(rule, dict) or intrinsic_name(rule) is not None:
+                b.ctx.note(
+                    f"{b.props.owner}: '{where}' is computed by a function and was not "
+                    f"converted; add the aws_vpc_security_group_{kind}_rule by hand"
+                )
+                b.props.comment(f"{kind}[{number - 1}] was not converted: {snippet(item)}")
+                continue
+            inner = Props(b.ctx, rule, where, b.props.owner)
             items: list[Any] = [Attr("security_group_id", b.self_ref("id"))]
-            if is_egress and default_egress:
+            if is_egress and item is default:
                 items.insert(0, hcl.Comment(_EGRESS_COMMENT))
             _rule_items(inner, is_egress)
             inner.finish()
             b.add_resource(
-                f"aws_vpc_security_group_{kind}_rule", f"_{kind}_{number}", items + inner.items
+                f"aws_vpc_security_group_{kind}_rule",
+                f"_{kind}_{number}",
+                items + inner.items,
+                when=when,
             )
 
 
@@ -591,7 +648,7 @@ def _key_values(p: Props, cfn_name: str) -> list[tuple[str, Any]]:
 
 def _unknown_attribute(p: Props, cfn_name: str, key: str, value: Any) -> None:
     p.ctx.note(f"{p.owner}: {cfn_name} '{key}' was not converted; set it by hand")
-    p.comment(f"{cfn_name} {key} = {hcl.inline(p.ctx.expr(value))} was not converted")
+    p.comment(f"{cfn_name} {snippet(key)} = {hcl.inline(p.ctx.expr(value))} was not converted")
 
 
 @resource(
@@ -616,7 +673,7 @@ def load_balancer(b: Builder) -> None:
         if isinstance(scheme, str):
             p.set("internal", scheme == "internal")
         else:
-            p.set("internal", Raw(f'{hcl.inline(ctx.expr(scheme))} == "internal"'))
+            p.set("internal", Raw(f'{operand(ctx.expr(scheme))} == "internal"'))
     p.attr("ip_address_type", "IpAddressType")
     p.list_attr("subnets", "Subnets")
     p.list_attr("security_groups", "SecurityGroups")
@@ -672,18 +729,28 @@ def target_group(b: Builder) -> None:
     p, ctx = b.props, b.ctx
     p.attr("name", "Name")
     p.number("port", "Port")
+    protocol = p.peek("Protocol")
+    target_type = p.peek("TargetType")
     p.attr("protocol", "Protocol")
     p.attr("protocol_version", "ProtocolVersion")
     p.attr("vpc_id", "VpcId")
     p.attr("target_type", "TargetType")
     p.attr("ip_address_type", "IpAddressType")
 
+    attributes = _key_values(p, "TargetGroupAttributes")
+    sticky_type = dict(attributes).get("stickiness.type", "lb_cookie")
+    # Each cookie type has its own duration; Terraform has one cookie_duration.
+    duration = (
+        "stickiness.app_cookie.duration_seconds"
+        if sticky_type == "app_cookie"
+        else "stickiness.lb_cookie.duration_seconds"
+    )
     stickiness: list[Attr] = []
-    for key, value in _key_values(p, "TargetGroupAttributes"):
+    for key, value in attributes:
         if key in _TARGET_GROUP_ATTRIBUTES:
             tf_name, kind = _TARGET_GROUP_ATTRIBUTES[key]
             p.set(tf_name, _typed(ctx, value, kind))
-        elif key in _STICKINESS:
+        elif key in _STICKINESS and (not key.endswith(".duration_seconds") or key == duration):
             tf_name, kind = _STICKINESS[key]
             stickiness.append(Attr(tf_name, _typed(ctx, value, kind)))
         else:
@@ -694,14 +761,18 @@ def target_group(b: Builder) -> None:
         value = p.take(cfn_name)
         if value is not None:
             health.append(Attr(tf_name, _typed(ctx, value, kind)))
-    matcher = p.take("Matcher")
-    if isinstance(matcher, dict):
+    matcher = p.literal("Matcher", dict)
+    if matcher is not None:
         code = matcher.get("HttpCode", matcher.get("GrpcCode"))
         if code is not None:
             health.append(Attr("matcher", ctx.expr(code)))
     if health:
+        health.extend(_health_check_defaults(health, protocol, target_type))
         p.items.append(Block("health_check", [], health))
     if stickiness:
+        # The provider turns stickiness on unless told otherwise; AWS leaves it off.
+        if not any(item.name == "enabled" for item in stickiness):
+            stickiness.insert(0, Attr("enabled", False))
         if not any(item.name == "type" for item in stickiness):
             stickiness.append(Attr("type", "lb_cookie"))
         p.items.append(Block("stickiness", [], stickiness))
@@ -721,12 +792,32 @@ def target_group(b: Builder) -> None:
         ctx.note(f"{b.logical_id}: Targets is computed and was not converted; attach them by hand")
 
 
+def _health_check_defaults(health: list[Any], protocol: Any, target_type: Any) -> list[Attr]:
+    """Settings the provider defaults differently from AWS, for a health_check block that
+    sets only some of them: thresholds (and interval for Lambda and GENEVE)."""
+    given = {item.name for item in health}
+    lambda_target = target_type == "lambda"
+    defaults = {
+        "healthy_threshold": 5,
+        "unhealthy_threshold": 5 if lambda_target else 2,
+    }
+    if lambda_target:
+        defaults["interval"] = 35
+    elif protocol == "GENEVE":
+        defaults["interval"] = 10
+    return [Attr(name, value) for name, value in defaults.items() if name not in given]
+
+
 def _action(r: Props) -> None:
     """A listener (rule) action as a default_action / action block."""
     r.attr("type", "Type")
     r.number("order", "Order")
-    if r.attr("target_group_arn", "TargetGroupArn"):
-        # CloudFormation lets both name the same group; Terraform takes one.
+    forward = r.peek("ForwardConfig")
+    if isinstance(forward, dict) and forward.get("TargetGroupStickinessConfig") is not None:
+        # Stickiness only exists in the forward block, and Terraform takes the group either
+        # there or in target_group_arn; CloudFormation lets both name the same one.
+        r.drop("TargetGroupArn")
+    elif r.attr("target_group_arn", "TargetGroupArn"):
         r.drop("ForwardConfig")
     r.block("forward", "ForwardConfig", _forward)
     r.block(
@@ -759,11 +850,12 @@ def _action(r: Props) -> None:
 
 
 def _forward(c: Props) -> None:
-    for group in c.take("TargetGroups") or []:
-        items = [Attr("arn", c.ctx.expr(group.get("TargetGroupArn")))]
-        if group.get("Weight") is not None:
-            items.append(Attr("weight", _number(c.ctx, group["Weight"])))
-        c.items.append(Block("target_group", [], items))
+    _blocks(
+        c,
+        "target_group",
+        "TargetGroups",
+        lambda g: (g.attr("arn", "TargetGroupArn"), g.number("weight", "Weight")),
+    )
     c.block(
         "stickiness",
         "TargetGroupStickinessConfig",
@@ -875,17 +967,18 @@ def _rule_condition(c: Props) -> None:
     legacy = c.take("Values")
     if not isinstance(field, str) or field not in _CONDITION_CONFIGS:
         c.ctx.note(f"{c.owner}: rule condition '{field}' was not converted; set it by hand")
-        c.comment(f"Condition on {field} was not converted")
+        c.comment(f"Condition on {snippet(field)} was not converted")
         return
     tf_name, cfn_name = _CONDITION_CONFIGS[field]
-    config = c.take(cfn_name)
-    config = config if isinstance(config, dict) else {}
+    config = c.literal(cfn_name, dict) or {}
     if field == "query-string":
-        for pair in config.get("Values", []):
-            items = [Attr("value", c.ctx.expr(pair.get("Value")))]
-            if pair.get("Key") is not None:
-                items.insert(0, Attr("key", c.ctx.expr(pair["Key"])))
-            c.items.append(Block(tf_name, [], items))
+        pairs = c.literal("Values", list, value=config.get("Values")) or []
+        c.add_blocks(
+            tf_name,
+            pairs,
+            lambda q: (q.attr("key", "Key"), q.attr("value", "Value")),
+            f"{c.where}.{cfn_name}.Values",
+        )
         return
     items: list[Any] = []
     if config.get("HttpHeaderName") is not None:
@@ -924,9 +1017,10 @@ def listener_rule(b: Builder) -> None:
 def hosted_zone(b: Builder) -> None:
     p = b.props
     p.attr("name", "Name")
-    config = p.take("HostedZoneConfig")
-    if isinstance(config, dict) and config.get("Comment") is not None:
-        p.set("comment", b.ctx.expr(config["Comment"]))
+    config = p.literal("HostedZoneConfig", dict) or {}
+    # The provider's default comment is "Managed by Terraform"; CloudFormation sets none.
+    comment = config.get("Comment")
+    p.set("comment", "" if comment is None else b.ctx.expr(comment))
     p.block("vpc", "VPCs", lambda v: v.attrs({"vpc_id": "VPCId", "vpc_region": "VPCRegion"}))
     p.tags("HostedZoneTags")
 
@@ -1168,7 +1262,8 @@ def distribution(b: Builder) -> None:
     c.list_attr("aliases", "Aliases")
     c.attr("comment", "Comment")
     c.attr("default_root_object", "DefaultRootObject")
-    c.attr("http_version", "HttpVersion")
+    if not c.attr("http_version", "HttpVersion"):
+        c.set("http_version", "http1.1")  # CloudFormation's default; the provider's is http2
     c.boolean("is_ipv6_enabled", "IPV6Enabled")
     c.attr("price_class", "PriceClass")
     c.attr("web_acl_id", "WebACLId")
@@ -1220,19 +1315,14 @@ def _origin(r: Props) -> None:
     r.number("connection_timeout", "ConnectionTimeout")
     r.number("response_completion_timeout", "ResponseCompletionTimeout")
     r.attr("origin_access_control_id", "OriginAccessControlId")
-    for header in r.take("OriginCustomHeaders") or []:
-        r.items.append(
-            Block(
-                "custom_header",
-                [],
-                [
-                    Attr("name", ctx.expr(header.get("HeaderName"))),
-                    Attr("value", ctx.expr(header.get("HeaderValue"))),
-                ],
-            )
-        )
-    s3 = r.take("S3OriginConfig")
-    if isinstance(s3, dict):
+    _blocks(
+        r,
+        "custom_header",
+        "OriginCustomHeaders",
+        lambda h: (h.attr("name", "HeaderName"), h.attr("value", "HeaderValue")),
+    )
+    s3 = r.literal("S3OriginConfig", dict)
+    if s3 is not None:
         identity = s3.get("OriginAccessIdentity")
         # An empty identity is how CloudFormation says "use the origin access control".
         if identity not in (None, ""):
@@ -1285,14 +1375,16 @@ def _custom_origin(c: Props) -> None:
 def _origin_group(g: Props) -> None:
     ctx = g.ctx
     g.attr("origin_id", "Id")
-    criteria = g.take("FailoverCriteria")
-    codes = criteria.get("StatusCodes") if isinstance(criteria, dict) else None
-    items = codes.get("Items", []) if isinstance(codes, dict) else []
+    criteria = g.literal("FailoverCriteria", dict) or {}
+    codes = g.literal("FailoverCriteria.StatusCodes", dict, value=criteria.get("StatusCodes"))
+    items = g.literal("StatusCodes.Items", list, value=(codes or {}).get("Items")) or []
     status_codes = Attr("status_codes", [_number(ctx, code) for code in items])
     g.items.append(Block("failover_criteria", [], [status_codes]))
-    members = g.take("Members")
-    for member in members.get("Items", []) if isinstance(members, dict) else []:
-        g.items.append(Block("member", [], [Attr("origin_id", ctx.expr(member.get("OriginId")))]))
+    members = g.literal("Members", dict) or {}
+    member_items = g.literal("Members.Items", list, value=members.get("Items")) or []
+    g.add_blocks(
+        "member", member_items, lambda m: m.attr("origin_id", "OriginId"), f"{g.where}.Members"
+    )
 
 
 def _methods(r: Props, tf_name: str, cfn_name: str) -> None:
@@ -1301,7 +1393,6 @@ def _methods(r: Props, tf_name: str, cfn_name: str) -> None:
 
 
 def _behavior(r: Props, ordered: bool) -> None:
-    ctx = r.ctx
     if ordered:
         r.attr("path_pattern", "PathPattern")
     _methods(r, "allowed_methods", "AllowedMethods")
@@ -1320,25 +1411,22 @@ def _behavior(r: Props, ordered: bool) -> None:
     r.boolean("smooth_streaming", "SmoothStreaming")
     r.list_attr("trusted_key_groups", "TrustedKeyGroups")
     r.list_attr("trusted_signers", "TrustedSigners")
-    for association in r.take("FunctionAssociations") or []:
-        r.items.append(
-            Block(
-                "function_association",
-                [],
-                [
-                    Attr("event_type", ctx.expr(association.get("EventType"))),
-                    Attr("function_arn", ctx.expr(association.get("FunctionARN"))),
-                ],
-            )
-        )
-    for association in r.take("LambdaFunctionAssociations") or []:
-        items = [
-            Attr("event_type", ctx.expr(association.get("EventType"))),
-            Attr("lambda_arn", ctx.expr(association.get("LambdaFunctionARN"))),
-        ]
-        if association.get("IncludeBody") is not None:
-            items.append(Attr("include_body", _bool(ctx, association["IncludeBody"])))
-        r.items.append(Block("lambda_function_association", [], items))
+    _blocks(
+        r,
+        "function_association",
+        "FunctionAssociations",
+        lambda a: (a.attr("event_type", "EventType"), a.attr("function_arn", "FunctionARN")),
+    )
+    _blocks(
+        r,
+        "lambda_function_association",
+        "LambdaFunctionAssociations",
+        lambda a: (
+            a.attr("event_type", "EventType"),
+            a.attr("lambda_arn", "LambdaFunctionARN"),
+            a.boolean("include_body", "IncludeBody"),
+        ),
+    )
     r.block("forwarded_values", "ForwardedValues", _forwarded_values)
 
 

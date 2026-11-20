@@ -108,13 +108,16 @@ class UniqueNames:
 
     def __init__(self) -> None:
         self._used: set[str] = set()
+        # Next suffix to try per wanted name, so many collisions stay linear.
+        self._next: dict[str, int] = {}
 
     def take(self, wanted: str) -> str:
         name = wanted
-        counter = 2
+        counter = self._next.get(wanted, 2)
         while name in self._used:
             name = f"{wanted}_{counter}"
             counter += 1
+        self._next[wanted] = counter
         self._used.add(name)
         return name
 

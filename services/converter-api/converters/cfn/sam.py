@@ -10,11 +10,13 @@ them with an archive_file data source.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections.abc import Callable
 from typing import Any
 
 from converters.cfn.context import Expression
+from converters.cfn.hcl import template_text
 from converters.cfn.parse import SAM_TRANSFORM, CfnError
 
 _PARTITION_ARN = "arn:${AWS::Partition}"
@@ -30,6 +32,7 @@ _GLOBAL_SECTIONS = {
 # Resource attributes every generated resource inherits from the SAM resource.
 _INHERITED = ("Condition", "DeletionPolicy", "UpdateReplacePolicy")
 _S3_URI = re.compile(r"^s3://([^/]+)/(.+)$")
+_SUB_REFERENCE = re.compile(r"\$\{([A-Za-z0-9]+\.[A-Za-z]+)\}")
 _FUNCTION_PROPERTIES = (
     "FunctionName",
     "Description",
@@ -288,7 +291,8 @@ def _local_path(value: str) -> str:
 
 def _file_body(uri: str) -> Expression:
     # yamldecode reads JSON as well, so this works for either kind of definition file.
-    return Expression(f'yamldecode(file("${{path.module}}/{_local_path(uri)}"))')
+    path = template_text(_local_path(uri))
+    return Expression(f'yamldecode(file("${{path.module}}/{path}"))')
 
 
 def _s3_location(uri: Any) -> Any:
@@ -309,9 +313,13 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _unique(values: list[Any]) -> list[Any]:
+    """Values without repeats, in order. Keys are JSON text, so it stays linear."""
+    seen: set[str] = set()
     out: list[Any] = []
     for value in values:
-        if value not in out:
+        key = json.dumps(value, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
             out.append(value)
     return out
 
@@ -347,11 +355,26 @@ def _substitute(definition: Any, substitutions: dict[str, Any]) -> Any:
     return definition
 
 
+def _rewrite_sub(text: str, aliases: dict[str, str]) -> str:
+    """`${MyApi.Stage}` in a Fn::Sub string means the stage resource, as with Ref."""
+    return _SUB_REFERENCE.sub(
+        lambda m: "${" + aliases[m.group(1)] + "}" if m.group(1) in aliases else m.group(0),
+        text,
+    )
+
+
 def _rewrite_refs(value: Any, aliases: dict[str, str]) -> Any:
     """`!Ref MyFunction.Alias`, `!Ref MyApi.Stage` and friends point at generated resources."""
     if isinstance(value, dict):
         if set(value) == {"Ref"} and value["Ref"] in aliases:
             return {"Ref": aliases[value["Ref"]]}
+        if set(value) == {"Fn::Sub"}:
+            args = value["Fn::Sub"]
+            if isinstance(args, str):
+                return {"Fn::Sub": _rewrite_sub(args, aliases)}
+            if isinstance(args, list) and args and isinstance(args[0], str):
+                rest = [_rewrite_refs(item, aliases) for item in args[1:]]
+                return {"Fn::Sub": [_rewrite_sub(args[0], aliases), *rest]}
         return {k: _rewrite_refs(v, aliases) for k, v in value.items()}
     if isinstance(value, list):
         return [_rewrite_refs(v, aliases) for v in value]
@@ -491,6 +514,9 @@ class _Expansion:
         managed: list[Any] = [_managed_policy(_BASIC_EXECUTION)]
         inline: list[dict[str, Any]] = []
         fn: dict[str, Any] = {name: p.pop(name) for name in _FUNCTION_PROPERTIES if name in p}
+        if "VpcConfig" in fn:
+            # SAM gives functions in a VPC the permissions to manage their network interfaces.
+            managed.append(_managed_policy("service-role/AWSLambdaVPCAccessExecutionRole"))
         self._code(logical_id, p, fn)
 
         tracing = p.pop("Tracing", None)
@@ -853,7 +879,7 @@ class _Expansion:
     def rest_api(self, logical_id: str, resource: dict[str, Any] | None) -> None:
         """AWS::Serverless::Api (or the implicit ServerlessRestApi): RestApi, Deployment, Stage."""
         origin = resource or {}
-        p = self.props(resource) if resource else {}
+        p = self.props(resource or {"Type": "AWS::Serverless::Api"})
         api: dict[str, Any] = {"Name": p.pop("Name", {"Ref": "AWS::StackName"})}
         generated = {
             "swagger": "2.0",
@@ -928,7 +954,7 @@ class _Expansion:
     def http_api(self, logical_id: str, resource: dict[str, Any] | None) -> None:
         """AWS::Serverless::HttpApi (or the implicit ServerlessHttpApi): Api and Stage."""
         origin = resource or {}
-        p = self.props(resource) if resource else {}
+        p = self.props(resource or {"Type": "AWS::Serverless::HttpApi"})
         api: dict[str, Any] = {
             "Name": p.pop("Name", {"Ref": "AWS::StackName"}),
             "ProtocolType": "HTTP",
