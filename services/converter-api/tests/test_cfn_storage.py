@@ -369,10 +369,7 @@ def test_conditional_stream_and_stream_policy_is_reported():
     assert 'stream_view_type = local.on ? "KEYS_ONLY" : null' in main
     assert "stream_view_type = null" not in main
     assert '# ResourcePolicy was left out. CloudFormation value: {"P": 1}' in main
-    assert any(
-        "'Policy.StreamSpecification.ResourcePolicy' yet" in n
-        for n in notes
-    )
+    assert any("'Policy.StreamSpecification.ResourcePolicy' yet" in n for n in notes)
     assert "# StreamSpecification was left out" in main
 
 
@@ -582,9 +579,7 @@ def test_conditional_and_computed_ecr_lifecycle_policy():
     lifecycle = main.split('resource "aws_ecr_lifecycle_policy" "cond_lifecycle"')[1]
     assert lifecycle.startswith(" {\n count = local.on ? 1 : 0")
     assert main.count('# RegistryId was left out. CloudFormation value: "1"') == 2
-    assert any(
-        "'Registry.LifecyclePolicy.RegistryId' yet" in n for n in notes
-    )
+    assert any("'Registry.LifecyclePolicy.RegistryId' yet" in n for n in notes)
     assert "# LifecyclePolicy was left out" in main
 
 

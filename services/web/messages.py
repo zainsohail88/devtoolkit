@@ -34,7 +34,9 @@ HTTP_ERROR_MESSAGES = {404: NOT_FOUND, 405: METHOD_NOT_ALLOWED}
 LENGTH_REQUIRED = "Content-Length required"
 TOO_LARGE = "The request is too large"
 
-UNKNOWN_LOG_LEVEL = 'LOG_LEVEL "{value}" is unknown, so the service logs at info. Use one of: {allowed}.'
+UNKNOWN_LOG_LEVEL = (
+    'LOG_LEVEL "{value}" is unknown, so the service logs at info. Use one of: {allowed}.'
+)
 
 NOTES_TITLE = "# Conversion notes"
 NOTES_INTRO = (
