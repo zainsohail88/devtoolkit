@@ -3,7 +3,7 @@
   {% if validation.valid %}
   <div role="status" class="alert alert-success">
     {% include "icons/circle-check.svg" %}
-    <span>Valid YAML: {{ validation.documents }} document{{ '' if validation.documents == 1 else 's' }}.</span>
+    <span>The YAML is valid ({{ validation.documents }} document{{ '' if validation.documents == 1 else 's' }}).</span>
   </div>
   {% else %}
   <div role="alert" class="alert alert-error" data-error{% if validation.line %} data-error-line="{{ validation.line }}" data-error-column="{{ validation.column or 1 }}"{% endif %}>
