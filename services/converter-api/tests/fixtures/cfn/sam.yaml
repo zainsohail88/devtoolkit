@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Orders service
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 10
+    Environment:
+      Variables:
+        TABLE: !Ref Orders
+Resources:
+  Orders:
+    Type: AWS::Serverless::SimpleTable
+  Uploads:
+    Type: AWS::S3::Bucket
+  Topic:
+    Type: AWS::SNS::Topic
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./src/api/
+      Handler: app.handler
+      Environment:
+        Variables:
+          MODE: api
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Orders
+        - AWSLambdaVPCAccessExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action: sns:Publish
+              Resource: !Ref Topic
+      Events:
+        GetOrders:
+          Type: Api
+          Properties:
+            Path: /orders/{id}
+            Method: get
+        Http:
+          Type: HttpApi
+          Properties:
+            Path: /h
+            Method: post
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+        Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref Uploads
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .csv
+        Notify:
+          Type: SNS
+          Properties:
+            Topic: !Ref Topic
+      FunctionUrlConfig:
+        AuthType: NONE
+      AutoPublishAlias: live
+  Worker:
+    Type: AWS::Serverless::Function
+    Connectors:
+      ToTopic:
+        Properties:
+          Destination:
+            Id: Topic
+          Permissions: [Write]
+    Properties:
+      InlineCode: |
+        def handler(event, context):
+            return "ok"
+      Handler: index.handler
+      Events:
+        Stream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt Table2.StreamArn
+            StartingPosition: LATEST
+  Table2:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions: [{AttributeName: id, AttributeType: S}]
+      KeySchema: [{AttributeName: id, KeyType: HASH}]
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification: {StreamViewType: NEW_IMAGE}
+  Flow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Definition:
+        StartAt: Call
+        States:
+          Call:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${Fn}
+            End: true
+      DefinitionSubstitutions:
+        Fn: !GetAtt Worker.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref Worker
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  AliasArn:
+    Value: !Ref ApiFunction.Alias

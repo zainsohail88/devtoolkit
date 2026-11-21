@@ -17,6 +17,10 @@ concurrency:
 env:
   PYTHON_VERSION: "3.13"
   KUBECONFORM_VERSION: "v0.7.0"
+  # Checks the CloudFormation converter's output. From terraform_<version>_SHA256SUMS on
+  # releases.hashicorp.com; update both together.
+  TERRAFORM_VERSION: "1.17.2"
+  TERRAFORM_SHA256: "e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b"
   # Every service under services/ (and k8s/). Jobs loop over this list, so the check names
   # the branch ruleset requires stay the same when a service is added.
   SERVICES: converter-api web
@@ -39,6 +43,11 @@ jobs:
             echo "== $service"
             (cd "services/$service" && ruff check . && ruff format --check .)
           done
+      # The rules ruff has no setting for: no nested functions or lambdas, no * or **,
+      # imports at the top only, no silenced checks, docstrings and return types, and the
+      # writing rules for the docs. See scripts/check_code_rules.py.
+      - name: House code rules
+        run: python scripts/check_code_rules.py
 
   test:
     runs-on: ubuntu-latest
@@ -94,6 +103,8 @@ jobs:
           curl -fsS localhost:8080/ | grep -q 'href="/compose-to-k8s"'
           curl -fsS -F compose_yaml=$'services:\n  app:\n    image: nginx\n    ports: ["80"]' \
             localhost:8080/compose-to-k8s | grep -q 'kind: Deployment'
+          curl -fsS -F template=$'Resources:\n  Logs:\n    Type: AWS::S3::Bucket' \
+            localhost:8080/cfn-to-terraform | grep -q 'aws_s3_bucket'
       - name: Show container logs
         if: failure()
         run: |
@@ -113,6 +124,34 @@ jobs:
           sudo mv kubeconform /usr/local/bin/
       - name: Validate manifests
         run: kubeconform -strict -summary -output pretty k8s/
+
+  # Converts the CloudFormation fixtures and checks the Terraform with the real providers.
+  validate-terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: services/*/requirements-dev.txt
+      - name: Install converter-api dependencies
+        run: pip install -r services/converter-api/requirements.txt
+      - name: Install Terraform
+        run: |
+          curl -sSfL --retry 5 --retry-delay 5 --retry-all-errors -o terraform.zip \
+            "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          echo "${TERRAFORM_SHA256}  terraform.zip" | sha256sum -c -
+          unzip -q terraform.zip terraform
+          sudo mv terraform /usr/local/bin/
+          terraform version
+      - name: terraform fmt and validate on every fixture
+        env:
+          # Each provider is downloaded once and shared by all fixtures.
+          TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/terraform-plugins
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          PYTHON=python scripts/validate-terraform.sh
 
   # Deploys k8s/ to a real kind cluster (same config as `make cluster-up`) and uses the UI.
   # Catches what static checks can't: probes, securityContext vs the image, Pod Security,
@@ -167,6 +206,8 @@ jobs:
           # A conversion through the UI: web -> converter-api inside the cluster.
           curl -fsS -F compose_yaml=$'services:\n  app:\n    image: nginx\n    ports: ["80"]' \
             localhost:8080/compose-to-k8s | tee /tmp/convert.html | grep -q 'kind: Deployment'
+          curl -fsS -F template=$'Resources:\n  Logs:\n    Type: AWS::S3::Bucket' \
+            localhost:8080/cfn-to-terraform | grep -q 'aws_s3_bucket'
       - name: converter-api is reachable from web only
         run: |
           # Single quotes only: this string is also embedded in the JSON below. The marker is
@@ -219,7 +260,7 @@ jobs:
 
   # Only after every check above passes, and only for pushes to main (not PRs).
   publish:
-    needs: [lint, test, build, validate-k8s, e2e]
+    needs: [lint, test, build, validate-k8s, validate-terraform, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

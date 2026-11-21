@@ -1,0 +1,159 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Log groups, filters, alarms and a dashboard
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+Resources:
+  AppLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /shop/app
+      RetentionInDays: "30"
+      LogGroupClass: STANDARD
+      DeletionProtectionEnabled: false
+      Tags:
+        - Key: app
+          Value: shop
+  ErrorCount:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterName: errors
+      LogGroupName: !Ref AppLogs
+      FilterPattern: ERROR
+      MetricTransformations:
+        - MetricName: Errors
+          MetricNamespace: Shop
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+  LatencyFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref AppLogs
+      FilterPattern: "{ $.latency = * }"
+      MetricTransformations:
+        - MetricName: Latency
+          MetricNamespace: Shop
+          MetricValue: $.latency
+          Dimensions:
+            - Key: Route
+              Value: $.route
+  Forward:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      FilterName: to-stream
+      LogGroupName: !Ref AppLogs
+      FilterPattern: ""
+      DestinationArn: !GetAtt LogStream.Arn
+      RoleArn: !GetAtt LogsRole.Arn
+      Distribution: ByLogStream
+  LogStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: logs
+      ShardCount: 1
+  LogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: write-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: logs:PutLogEvents
+                Resource: !GetAtt AppLogs.Arn
+  Alarms:
+    Type: AWS::SNS::Topic
+  ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: shop-errors
+      AlarmDescription: Too many errors
+      ActionsEnabled: true
+      AlarmActions: [!Ref Alarms, !If [IsProd, !Ref Alarms, !Ref AWS::NoValue]]
+      OKActions: [!Ref Alarms]
+      InsufficientDataActions: [!Ref Alarms]
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      MetricName: Errors
+      Namespace: Shop
+      Period: 60
+      Statistic: Sum
+      Threshold: "5"
+      TreatMissingData: notBreaching
+      Unit: Count
+      Dimensions:
+        - Name: Service
+          Value: app
+      Tags:
+        - Key: app
+          Value: shop
+  LatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      Threshold: 500
+      ExtendedStatistic: p99
+      MetricName: Latency
+      Namespace: Shop
+      Period: 300
+      EvaluateLowSampleCountPercentile: ignore
+  RatioAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: error-ratio
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      Threshold: 0.05
+      Metrics:
+        - Id: ratio
+          Expression: errors / requests
+          Label: Error ratio
+          ReturnData: true
+        - Id: errors
+          ReturnData: false
+          MetricStat:
+            Metric:
+              MetricName: Errors
+              Namespace: Shop
+              Dimensions:
+                - Name: Service
+                  Value: app
+            Period: 60
+            Stat: Sum
+            Unit: Count
+        - Id: requests
+          ReturnData: false
+          MetricStat:
+            Metric:
+              MetricName: Requests
+              Namespace: Shop
+            Period: 60
+            Stat: Sum
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: shop
+      DashboardBody: !Sub '{"widgets": [{"type": "text", "x": 0, "y": 0, "width": 6, "height": 3, "properties": {"markdown": "Shop in ${AWS::Region}"}}]}'
+  PlainDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardBody: '{"widgets": []}'
+Outputs:
+  LogGroupArn:
+    Value: !GetAtt AppLogs.Arn
+  AlarmArn:
+    Value: !GetAtt ErrorAlarm.Arn

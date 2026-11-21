@@ -16,6 +16,7 @@ from converters.compose_to_k8s import (
     parse_ports,
     to_k8s_name,
 )
+from converters.yaml_safety import load_yaml_documents
 
 BASIC_COMPOSE = """
 version: '3'
@@ -607,8 +608,6 @@ def test_python_object_tags_are_rejected():
 
 
 def test_load_yaml_documents_is_safe_and_multi_document():
-    from converters.compose_to_k8s import load_yaml_documents
-
     assert load_yaml_documents("a: 1\n---\nb: [2, 3]\n") == [{"a": 1}, {"b": [2, 3]}]
     assert load_yaml_documents("") == []
     with pytest.raises(yaml.YAMLError):
@@ -629,8 +628,6 @@ def test_convert_memory_tolerates_whitespace(value, expected):
 
 def test_convert_memory_rejects_long_whitespace_quickly():
     """Linear-time regex: a pathological input is rejected at once, not after seconds."""
-    import time
-
     started = time.perf_counter()
     with pytest.raises(ComposeError):
         convert_memory("0" + " " * 50_000 + "x")

@@ -9,18 +9,16 @@ from html.parser import HTMLParser
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from main import (
-    EXAMPLE_COMPOSE,
-    HTML_CACHE,
-    MAX_BODY_BYTES,
-    MAX_INPUT_CHARS,
-    SECURITY_HEADERS,
-    STATIC_CACHE,
-    create_app,
-    static_url,
-)
+from api_client import ApiClient
+from examples import EXAMPLE_COMPOSE
+from log_config import configure_logging, resolve_log_level
+from main import create_app
+from rendering import static_versions
+from security import HTML_CACHE, SECURITY_HEADERS, STATIC_CACHE
+from settings import MAX_BODY_BYTES, MAX_INPUT_CHARS, MAX_TEMPLATE_CHARS
 
 COMPOSE = 'services:\n  web:\n    image: nginx\n    ports:\n      - "8080:80"\n'
 FILES = [
@@ -56,6 +54,21 @@ def inline_scripts(html: str) -> list[str]:
     parser = _InlineScripts()
     parser.feed(html)
     return parser.scripts
+
+
+def form_body_chunks():
+    """A request body sent in chunks, so the client sends no Content-Length."""
+    yield b"compose_yaml=x"
+
+
+def unreachable(request: httpx.Request) -> httpx.Response:
+    """A converter-api that refuses every connection."""
+    raise httpx.ConnectError("connection refused", request=request)
+
+
+def boom() -> None:
+    """A route that fails with an HTTP error other than 404 or 405."""
+    raise HTTPException(503, "Down for maintenance")
 
 
 def ok_files(fake_api, files=FILES, notes=()):
@@ -119,7 +132,7 @@ def test_static_urls_are_versioned_by_content(client):
     # Built files (app.css, vendor/editor.js) may be absent in tests; the page still works.
     assert re.search(r'href="/static/app\.css\?v=([0-9a-f]{8}|0)"', html)
     assert re.search(r'src="/static/vendor/editor\.js\?v=([0-9a-f]{8}|0)"', html)
-    assert static_url("does-not-exist.css") == "/static/does-not-exist.css?v=0"
+    assert static_versions.url("does-not-exist.css") == "/static/does-not-exist.css?v=0"
 
 
 def test_page_structure_and_theme_toggle(client):
@@ -144,7 +157,7 @@ def test_404_page_has_a_way_back(client):
 def test_405_page(client):
     response = client.post("/", content=b"", headers={"Content-Length": "0"})
     assert response.status_code == 405
-    assert "isn&#39;t allowed here" in response.text
+    assert "is not allowed here" in response.text
 
 
 def test_malformed_form_gets_an_html_error(client, fake_api):
@@ -152,7 +165,7 @@ def test_malformed_form_gets_an_html_error(client, fake_api):
         "/compose-to-k8s", data={"compose_yaml": COMPOSE, "include_service": "maybe"}
     )
     assert response.status_code == 400
-    assert "wasn&#39;t filled in correctly" in response.text
+    assert "was not filled in correctly" in response.text
     assert fake_api.requests == []
 
 
@@ -256,7 +269,7 @@ def test_upload_not_utf8(client, fake_api):
         files={"compose_file": ("x.yaml", b"\xff\xfe\x00bad", "text/yaml")},
     )
     assert response.status_code == 400
-    assert "isn&#39;t UTF-8" in response.text
+    assert "is not UTF-8 text." in response.text
     assert fake_api.requests == []
 
 
@@ -287,10 +300,7 @@ def test_body_too_large(client, fake_api):
 
 
 def test_post_without_content_length(client):
-    def body():
-        yield b"compose_yaml=x"
-
-    response = client.post("/compose-to-k8s", content=body())
+    response = client.post("/compose-to-k8s", content=form_body_chunks())
     assert response.status_code == 411
 
 
@@ -317,7 +327,7 @@ def test_compose_unexpected_api_answer(client, fake_api):
     fake_api.body = {"detail": [{"msg": "..."}]}
     response = client.post("/compose-to-k8s", data={"compose_yaml": COMPOSE})
     assert response.status_code == 400
-    assert "couldn&#39;t process this input" in response.text
+    assert "could not process this input" in response.text
 
 
 def test_compose_success_without_files_list_is_an_error(client, fake_api):
@@ -349,11 +359,6 @@ def test_compose_api_json_not_object(client, fake_api):
 
 
 def test_compose_api_unreachable():
-    def unreachable(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused", request=request)
-
-    from api_client import ApiClient
-
     api = ApiClient("http://converter-api", transport=httpx.MockTransport(unreachable))
     with TestClient(create_app(api)) as client:
         response = client.post("/compose-to-k8s", data={"compose_yaml": COMPOSE})
@@ -482,7 +487,7 @@ def test_validate_unexpected_api_answer(client, fake_api):
     fake_api.body = {"detail": "bad"}
     response = client.post("/validate-yaml", data={"yaml_text": "a: 1"})
     assert response.status_code == 400
-    assert "couldn&#39;t process this input" in response.text
+    assert "could not process this input" in response.text
 
 
 def test_validate_api_down(client, fake_api):
@@ -496,39 +501,242 @@ def test_validate_api_down(client, fake_api):
 
 
 def test_resolve_log_level():
-    from main import resolve_log_level
-
     assert resolve_log_level(None) == ("INFO", None)
     assert resolve_log_level(" Debug ") == ("DEBUG", None)
     level, warning = resolve_log_level("loud")
     assert level == "INFO"
-    assert "Unknown LOG_LEVEL 'loud'" in warning
+    assert 'Unknown LOG_LEVEL "loud": using info.' in warning
 
 
 def test_configure_logging_warns_on_unknown_level(caplog):
-    from main import configure_logging
-
     assert configure_logging("warning") == "WARNING"
     with caplog.at_level("WARNING", logger="web"):
         assert configure_logging("loud") == "INFO"
-    assert "Unknown LOG_LEVEL 'loud'" in caplog.text
+    assert 'Unknown LOG_LEVEL "loud"' in caplog.text
 
 
 def test_other_http_errors_render_the_error_page(fake_api):
-    from fastapi import HTTPException
-
-    from api_client import ApiClient
-
     api = ApiClient("http://converter-api", transport=httpx.MockTransport(fake_api.handler))
     app = create_app(api)
-
-    @app.get("/boom")
-    def boom() -> None:
-        raise HTTPException(503, "Down for maintenance")
-
+    app.add_api_route("/boom", boom)
     with TestClient(app) as client:
         response = client.get("/boom")
     assert response.status_code == 503
     assert response.headers["content-type"].startswith("text/html")
     assert "Down for maintenance" in response.text
     assert 'href="/"' in response.text
+
+
+def test_app_without_a_given_client_reads_the_environment(monkeypatch):
+    monkeypatch.setenv("CONVERTER_API_URL", "http://elsewhere:9000")
+    app = create_app()
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert str(app.state.api._client.base_url) == "http://elsewhere:9000"
+    assert app.state.api._client.is_closed
+
+
+# --- CloudFormation -> Terraform -------------------------------------------------------------
+
+TEMPLATE = "Resources:\n  Bucket:\n    Type: AWS::S3::Bucket\n"
+TF_FILES = [
+    {"path": "versions.tf", "content": 'terraform {\n  required_version = ">= 1.5"\n}\n'},
+    {"path": "main.tf", "content": 'resource "aws_s3_bucket" "bucket" {}\n'},
+]
+TF_RESOURCES = [
+    {
+        "logical_id": "Bucket",
+        "type": "AWS::S3::Bucket",
+        "address": "aws_s3_bucket.bucket",
+        "status": "aws",
+    },
+    {"logical_id": "Hook", "type": "Custom::Hook", "address": None, "status": "unsupported"},
+]
+
+
+def ok_terraform(fake_api, notes=(), source="sam"):
+    fake_api.body = {
+        "success": True,
+        "source": source,
+        "files": TF_FILES,
+        "notes": list(notes),
+        "resources": TF_RESOURCES,
+        "summary": {"resources": 2, "aws": 1, "awscc": 0, "unsupported": 1},
+    }
+
+
+def test_cfn_form_renders_empty_state_and_examples(client):
+    html = client.get("/cfn-to-terraform").text
+    assert 'name="template"' in html
+    assert 'name="provider" value="aws" checked' in html
+    assert 'name="layout" value="files" checked' in html
+    assert 'name="include_imports" value="true" >' in html
+    assert html.count("data-load-example") == 3
+    assert "data-empty" in html and "data-zip hidden" in html
+    assert 'href="/cfn-to-terraform" class="nav-link" aria-current="page"' in html
+
+
+def test_cfn_nav_and_index_card(client):
+    html = client.get("/").text
+    assert 'href="/cfn-to-terraform" class="card' in html
+    assert 'href="/cfn-to-terraform" class="nav-link">' in html
+
+
+@pytest.mark.parametrize(
+    ("example", "marker"),
+    [
+        ("cloudformation", "Resizer"),
+        ("sam", "Serverless"),
+        ("cdk", "CDKMetadata"),
+        ("nope", "Resizer"),
+    ],
+)
+def test_cfn_examples(client, example, marker):
+    text = client.get(f"/cfn-to-terraform?example={example}", headers={"Accept": "text/plain"}).text
+    assert marker in text
+    html = client.get(f"/cfn-to-terraform?example={example}").text
+    assert "<html" in html and marker in html
+
+
+def test_cfn_convert_renders_summary_files_resources_and_notes(client, fake_api):
+    ok_terraform(fake_api, notes=["Hook (Custom::Hook) was not converted"])
+    response = client.post(
+        "/cfn-to-terraform",
+        data={
+            "template": TEMPLATE,
+            "provider": "awscc",
+            "layout": "single",
+            "stack_name": " shop ",
+            "include_imports": "true",
+        },
+    )
+    assert response.status_code == 200
+    assert fake_api.requests == [
+        (
+            "/convert/cfn-to-terraform",
+            {
+                "template": TEMPLATE,
+                "provider": "awscc",
+                "layout": "single",
+                "include_imports": True,
+                "stack_name": "shop",
+            },
+        )
+    ]
+    html = response.text
+    assert "AWS SAM" in html
+    assert "2 resources:" in html and "1 aws" in html and "1 not converted" in html
+    assert "awscc</span>" not in html  # no awscc count when there are none
+    assert 'data-path="main.tf"' in html and "aws_s3_bucket" in html
+    assert "Where each resource went (2)" in html
+    assert "aws_s3_bucket.bucket" in html and "Custom::Hook" in html
+    assert "Needs a decision (1)" in html
+    assert 'name="provider" value="awscc" checked' in html
+    assert 'value="shop"' in html
+
+
+def test_cfn_convert_fragment_without_stack_name(client, fake_api):
+    ok_terraform(fake_api, source="cloudformation")
+    response = client.post("/cfn-to-terraform", data={"template": TEMPLATE}, headers=FRAGMENT)
+    assert response.status_code == 200
+    assert "<html" not in response.text
+    assert "stack_name" not in fake_api.requests[0][1]
+    assert "CloudFormation" in response.text
+
+
+def test_cfn_convert_from_upload(client, fake_api):
+    ok_terraform(fake_api)
+    response = client.post(
+        "/cfn-to-terraform",
+        data={"template": ""},
+        files={"template_file": ("template.json", b'{"Resources": {}}', "application/json")},
+    )
+    assert response.status_code == 200
+    assert fake_api.requests[0][1]["template"] == '{"Resources": {}}'
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"template": " "}, "Paste a template"),
+        ({"template": "a" * (MAX_TEMPLATE_CHARS + 1)}, "longer than 500,000"),
+        ({"template": TEMPLATE, "stack_name": "1bad"}, "Stack name must start"),
+        ({"template": TEMPLATE, "provider": "gcp"}, "Provider must be"),
+        ({"template": TEMPLATE, "layout": "tree"}, "Layout must be"),
+    ],
+)
+def test_cfn_input_rejected_before_calling_api(client, fake_api, data, message):
+    response = client.post("/cfn-to-terraform", data=data)
+    assert response.status_code == 400
+    assert message in response.text
+    assert fake_api.requests == []
+
+
+def test_a_template_larger_than_the_compose_limit_is_accepted(client, fake_api):
+    ok_terraform(fake_api)
+    big = TEMPLATE + "#" * (MAX_INPUT_CHARS * 2)
+    response = client.post("/cfn-to-terraform", data={"template": big})
+    assert response.status_code == 200
+
+
+def test_cfn_rejected_by_api_with_position(client, fake_api):
+    fake_api.status = 400
+    fake_api.body = {"success": False, "error": "Invalid YAML: bad", "line": 4, "column": 1}
+    response = client.post("/cfn-to-terraform", data={"template": TEMPLATE}, headers=FRAGMENT)
+    assert response.status_code == 400
+    assert 'data-error-line="4"' in response.text
+    assert "data-files" not in response.text and "data-empty" not in response.text
+
+
+def test_cfn_unexpected_answer_and_outage(client, fake_api):
+    fake_api.status = 422
+    fake_api.body = {"detail": []}
+    response = client.post("/cfn-to-terraform", data={"template": TEMPLATE})
+    assert response.status_code == 400
+    assert "could not process this input" in response.text
+    fake_api.status = 503
+    response = client.post("/cfn-to-terraform", data={"template": TEMPLATE})
+    assert response.status_code == 502
+    assert "unavailable right now" in response.text
+
+
+def test_cfn_zip_has_files_and_notes(client, fake_api):
+    ok_terraform(fake_api, notes=["Check the bucket name"])
+    response = client.post("/cfn-to-terraform/zip", data={"template": TEMPLATE})
+    assert response.status_code == 200
+    assert 'filename="terraform.zip"' in response.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["versions.tf", "main.tf", "CONVERSION_NOTES.md"]
+        notes = archive.read("CONVERSION_NOTES.md").decode()
+    assert (
+        "Converted from AWS SAM by DevToolkit. The items below need a decision; "
+        "everything else was converted." in notes
+    )
+    assert "- Check the bucket name" in notes
+
+
+def test_cfn_zip_without_notes_and_after_an_error(client, fake_api):
+    ok_terraform(fake_api, source="unknown-kind")
+    response = client.post("/cfn-to-terraform/zip", data={"template": TEMPLATE})
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        notes = archive.read("CONVERSION_NOTES.md").decode()
+    assert (
+        "Converted from unknown-kind" in notes
+        and "- Nothing: every resource was converted." in notes
+    )
+    fake_api.status = 400
+    fake_api.body = {"success": False, "error": "No resources"}
+    response = client.post("/cfn-to-terraform/zip", data={"template": TEMPLATE})
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("text/html")
+
+
+def test_cfn_output_is_escaped(client, fake_api):
+    ok_terraform(fake_api, notes=["<b>x</b>"])
+    fake_api.body["files"] = [{"path": "<i>.tf", "content": "<script>alert(1)</script>"}]
+    fake_api.body["resources"] = [
+        {"logical_id": "<u>", "type": "T", "address": None, "status": "unsupported"}
+    ]
+    html = client.post("/cfn-to-terraform", data={"template": TEMPLATE}).text
+    assert "<script>alert(1)</script>" not in html and "<b>x</b>" not in html and "<u>" not in html
+    assert len(inline_scripts(html)) == 1

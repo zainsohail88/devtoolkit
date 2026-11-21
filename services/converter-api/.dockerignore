@@ -7,3 +7,4 @@ __pycache__/
 htmlcov/
 requirements-dev.txt
 pyproject.toml
+tools/

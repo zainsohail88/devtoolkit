@@ -1,11 +1,11 @@
 # Deploying to your own cluster
 
-The manifests in `k8s/` work on any conformant Kubernetes cluster: a local one, GKE, EKS, AKS or self-hosted. Each published image is public, so no registry credentials are needed.
+The manifests in `k8s/` work on any conformant Kubernetes cluster: a local one, GKE, EKS, AKS or self-hosted. Each published image is public, so pulling needs no registry credentials.
 
 ## Requirements
 
 - Kubernetes **1.25 or newer**. The `devtoolkit` namespace uses Pod Security admission, which is built in from 1.25.
-- A CNI that enforces NetworkPolicy, if you want `converter-api` to be reachable from `web` only. kind's default (kindnet), Calico, Cilium and GKE Dataplane V2 do. Without one the policy is accepted but has no effect.
+- A CNI that enforces NetworkPolicy, for `converter-api` to be reachable from `web` only. kindnet (the kind default), Calico, Cilium and GKE Dataplane V2 enforce it. On other CNIs the policy is accepted and has no effect.
 - `kubectl` pointed at the cluster you want, with permission to create a namespace.
 - Nodes able to pull from `ghcr.io`.
 

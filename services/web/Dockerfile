@@ -61,7 +61,8 @@ RUN groupadd --system --gid 10001 app \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
-COPY --chown=app:app main.py api_client.py ./
+COPY --chown=app:app *.py ./
+COPY --chown=app:app routes/ routes/
 COPY --chown=app:app templates/ templates/
 COPY --chown=app:app static/ static/
 COPY --from=css --chown=app:app /out/app.css static/app.css

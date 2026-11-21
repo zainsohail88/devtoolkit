@@ -25,6 +25,7 @@ class GoogleIdTokens:
     """Fetches and caches ID tokens so Cloud Run lets this service call a private service."""
 
     def __init__(self, audience: str, client: httpx.AsyncClient) -> None:
+        """Fetch tokens for `audience` with `client`."""
         self._audience = audience
         self._client = client
         self._token: str | None = None
@@ -32,6 +33,7 @@ class GoogleIdTokens:
         self._lock = asyncio.Lock()
 
     async def get(self) -> str:
+        """A valid ID token, fetched from the metadata server when the cached one expired."""
         async with self._lock:
             if self._token is None or time.monotonic() >= self._expires_at:
                 response = await self._client.get(
@@ -46,6 +48,8 @@ class GoogleIdTokens:
 
 
 class ApiClient:
+    """An HTTP client for converter-api, with Google ID tokens when auth is google."""
+
     def __init__(
         self,
         base_url: str,
@@ -53,6 +57,7 @@ class ApiClient:
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 15.0,
     ) -> None:
+        """A client for converter-api at `base_url`. Raises ValueError for an unknown auth."""
         if auth not in AUTH_MODES:
             raise ValueError(f"CONVERTER_API_AUTH must be one of {', '.join(AUTH_MODES)}")
         self._client = httpx.AsyncClient(
@@ -63,8 +68,8 @@ class ApiClient:
         )
 
     async def post(self, path: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        """POST JSON and return (status, body). Raises ApiUnavailableError for anything that
-        isn't an answer from converter-api itself: network errors, auth failures, 5xx."""
+        """POST JSON and return (status, body). Raises ApiUnavailableError for anything other
+        than an answer from converter-api itself: network errors, auth failures and 5xx."""
         try:
             headers = {}
             if self._tokens is not None:
@@ -83,4 +88,5 @@ class ApiClient:
         return response.status_code, body
 
     async def aclose(self) -> None:
+        """Close the connections."""
         await self._client.aclose()

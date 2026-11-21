@@ -5,11 +5,13 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from converters.compose_to_k8s import (
+from converters.compose_constants import (
     DEFAULT_LIMITS,
     DEFAULT_REQUESTS,
     DEFAULT_VOLUME_SIZE,
     WAIT_IMAGE,
+)
+from converters.compose_to_k8s import (
     ComposeError,
     convert_compose_to_k8s,
     convert_depends_on,
@@ -22,8 +24,8 @@ from converters.compose_to_k8s import (
 from converters.render import chart_name_from, render_files
 
 
-def convert(text: str, **kwargs):
-    return convert_compose_to_k8s(parse_compose(text), **kwargs)
+def convert(text: str, namespace: str = "default", include_service: bool = True):
+    return convert_compose_to_k8s(parse_compose(text), namespace, include_service)
 
 
 def container_of(result, name="web"):
@@ -242,6 +244,7 @@ def test_depends_on_without_ports_is_a_note():
     )
     assert "initContainers" not in container_of(result)
     assert any("has no ports" in n for n in result["notes"])
+    assert any("make 'web' retry its connection" in n for n in result["notes"])
 
 
 def test_depends_on_without_services_is_a_note():
