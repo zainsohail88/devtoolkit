@@ -19,16 +19,26 @@ STACK_NAME_PATTERN = r"^[A-Za-z][-A-Za-z0-9]{0,127}$"
 class ConvertRequest(BaseModel):
     """A docker-compose file to convert to Kubernetes manifests."""
 
-    compose_yaml: str = Field(..., max_length=MAX_INPUT_CHARS, description="docker-compose YAML")
-    namespace: str = Field("default", pattern=NAMESPACE_PATTERN)
-    include_service: bool = True
+    compose_yaml: str = Field(
+        ..., max_length=MAX_INPUT_CHARS, description="The docker-compose file to convert, as YAML."
+    )
+    namespace: str = Field(
+        "default",
+        pattern=NAMESPACE_PATTERN,
+        description="Kubernetes namespace of the resources. Any namespace other than 'default' "
+        "also gets a Namespace manifest.",
+    )
+    include_service: bool = Field(
+        True, description="Add a ClusterIP Service for each compose service that has ports."
+    )
 
 
 class ConvertFilesRequest(ConvertRequest):
     """A docker-compose file to convert, and the kind of files to return."""
 
     output: Literal["manifests", "helm"] = Field(
-        "manifests", description="'manifests': one YAML file per resource. 'helm': a Helm chart."
+        "manifests",
+        description="'manifests' returns one YAML file per resource. 'helm' returns a Helm chart.",
     )
 
 
@@ -38,27 +48,37 @@ class CfnRequest(BaseModel):
     template: str = Field(
         ...,
         max_length=MAX_TEMPLATE_CHARS,
-        description="CloudFormation, AWS SAM or `cdk synth` template, JSON or YAML",
+        description="The CloudFormation, AWS SAM or `cdk synth` template to convert, as JSON "
+        "or YAML.",
     )
     provider: Literal["aws", "awscc"] = Field(
         "aws",
-        description="'aws': hand-written aws provider mappings, awscc for other types. "
-        "'awscc': every resource with the awscc provider.",
+        description="'aws' uses the aws provider for every type the converter maps by hand "
+        "and awscc for the rest. 'awscc' uses the awscc provider for every resource.",
     )
     layout: Literal["files", "single"] = Field(
-        "files", description="'files': versions.tf, variables.tf, main.tf... 'single': main.tf"
+        "files",
+        description="'files' splits the output into versions.tf, variables.tf, main.tf and more "
+        "files. 'single' puts everything in main.tf.",
     )
     stack_name: str | None = Field(
         None,
         pattern=STACK_NAME_PATTERN,
-        description="Default for var.stack_name, which replaces AWS::StackName",
+        description="Default value of var.stack_name. The Terraform code uses it wherever the "
+        "template uses AWS::StackName.",
     )
     include_imports: bool = Field(
-        False, description="Also write imports.tf, to adopt resources the stack already created"
+        False,
+        description="Also write imports.tf, so Terraform can take over the resources the stack "
+        "already created.",
     )
 
 
 class ValidateRequest(BaseModel):
     """YAML text to check, one document or several separated by ---."""
 
-    yaml: str = Field(..., max_length=MAX_INPUT_CHARS)
+    yaml: str = Field(
+        ...,
+        max_length=MAX_INPUT_CHARS,
+        description="The YAML to check. Separate several documents with ---.",
+    )

@@ -272,11 +272,11 @@ def test_command_and_entrypoint():
 def test_build_uses_service_name_as_image():
     result = convert_compose_to_k8s({"services": {"api": {"build": "."}}})
     assert container_of(result["manifests"]["deployments"][0])["image"] == "api:latest"
-    assert any("uses 'build'" in note for note in result["notes"])
+    assert any("builds its image" in note for note in result["notes"])
 
 
 def test_service_without_image_or_build():
-    with pytest.raises(ComposeError, match="neither 'image' nor 'build'"):
+    with pytest.raises(ComposeError, match="needs an 'image' or a 'build'"):
         convert_service_to_deployment("x", {})
 
 
@@ -287,7 +287,7 @@ def test_name_sanitising():
 
 
 def test_name_collision():
-    with pytest.raises(ComposeError, match="both map"):
+    with pytest.raises(ComposeError, match="would both get the Kubernetes name"):
         convert_compose_to_k8s({"services": {"my_app": {"image": "a"}, "my-app": {"image": "b"}}})
 
 
@@ -315,7 +315,7 @@ services:
     notes = " | ".join(convert_compose_to_k8s(compose)["notes"])
     for expected in [
         "renamed to 'web-app'",
-        "bind mount './data:/data' was not converted",
+        "bind mount './data:/data' reads files from your machine",
         "reach each other by name",
         "env_file",
         "placeholder requests",
@@ -330,7 +330,7 @@ services:
 
 
 def test_invalid_yaml_handling():
-    with pytest.raises(ComposeError, match="Invalid YAML"):
+    with pytest.raises(ComposeError, match="The YAML is invalid"):
         parse_compose("services:\n  web:\n    image: nginx\n   ports: [80")
 
 
@@ -349,7 +349,7 @@ def test_empty_input(text):
     ],
 )
 def test_missing_services_error(text):
-    with pytest.raises(ComposeError, match="no 'services'"):
+    with pytest.raises(ComposeError, match="needs a 'services' section"):
         parse_compose(text)
 
 
@@ -359,12 +359,12 @@ def test_top_level_must_be_mapping():
 
 
 def test_services_must_be_mapping():
-    with pytest.raises(ComposeError, match="'services' must be a mapping"):
+    with pytest.raises(ComposeError, match="'services' must be a mapping of service names"):
         parse_compose("services:\n  - web\n")
 
 
 def test_service_must_be_mapping():
-    with pytest.raises(ComposeError, match="service 'web' must be a mapping"):
+    with pytest.raises(ComposeError, match="Service 'web' must be a mapping"):
         parse_compose("services:\n  web: nginx\n")
 
 
@@ -393,7 +393,7 @@ def _alias_bomb(levels: int) -> str:
 
 
 def test_alias_bomb_rejected_quickly():
-    with pytest.raises(ComposeError, match="Input too large"):
+    with pytest.raises(ComposeError, match="The YAML is too large"):
         parse_compose(_alias_bomb(8))
 
 
@@ -466,13 +466,13 @@ def test_wrong_field_types_give_clear_errors(snippet, message):
 
 
 def test_parse_ports_rejects_non_list():
-    with pytest.raises(ComposeError, match="must be lists"):
+    with pytest.raises(ComposeError, match="must each be a list"):
         parse_ports("8080:80")
 
 
 def test_unbalanced_quotes_in_command():
     compose = parse_compose('services:\n  w:\n    image: x\n    command: "echo \'hi"\n')
-    with pytest.raises(ComposeError, match="could not parse 'command'"):
+    with pytest.raises(ComposeError, match="the quoting in 'command' is broken"):
         convert_compose_to_k8s(compose)
 
 
@@ -542,7 +542,7 @@ services:
 def test_too_many_values_rejected_before_loading():
     flat = "services:\n  w:\n    image: x\n    labels: [" + ",".join(["a"] * 30000) + "]\n"
     start = time.perf_counter()
-    with pytest.raises(ComposeError, match="Input too large"):
+    with pytest.raises(ComposeError, match="The YAML is too large"):
         parse_compose(flat)
     assert time.perf_counter() - start < 0.5
 
@@ -570,14 +570,14 @@ def test_explicit_empty_env_value_not_flagged_as_host_var():
         "services:\n  w:\n    image: x\n    environment: ['EMPTY=', 'FROM_HOST']\n"
     )
     notes = " | ".join(convert_compose_to_k8s(compose)["notes"])
-    assert "'FROM_HOST' has no value" in notes
+    assert "variable 'FROM_HOST' gets its value from the host" in notes
     assert "EMPTY" not in notes
 
 
 def test_dict_env_null_vs_empty_string():
     compose = parse_compose("services:\n  w:\n    image: x\n    environment: {A: , B: ''}\n")
     notes = " | ".join(convert_compose_to_k8s(compose)["notes"])
-    assert "'A' has no value" in notes
+    assert "variable 'A' gets its value from the host" in notes
     assert "'B'" not in notes
 
 
@@ -587,7 +587,10 @@ def test_placeholder_resources_when_no_k8s_limits_generated():
         "services:\n  w:\n    image: x\n    deploy: {resources: {limits: {pids: 5}}}\n"
     )
     result = convert_compose_to_k8s(compose)
-    assert any(n.startswith("'w' had no resource limits: placeholder") for n in result["notes"])
+    assert any(
+        n.startswith("Service 'w' has no resource limits, so the converter added placeholder")
+        for n in result["notes"]
+    )
     container = result["manifests"]["deployments"][0]["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["limits"] == {"cpu": "500m", "memory": "512Mi"}
 
@@ -603,7 +606,9 @@ def test_invalid_env_entries_rejected(environment, message):
 
 def test_python_object_tags_are_rejected():
     """The loaders are SafeLoader subclasses: YAML can never build Python objects."""
-    with pytest.raises(ComposeError, match="Invalid YAML: could not determine a constructor"):
+    with pytest.raises(
+        ComposeError, match="The YAML is invalid: could not determine a constructor"
+    ):
         parse_compose("services: !!python/object/apply:os.system ['echo pwned']")
 
 

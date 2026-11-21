@@ -71,7 +71,9 @@ def parse_compose(yaml_string: str) -> dict[str, Any]:
         ComposeError: if the YAML is invalid, not a mapping, or has no services.
     """
     if not yaml_string or not yaml_string.strip():
-        raise ComposeError("Input is empty")
+        raise ComposeError(
+            "The compose file is empty. Paste a docker-compose file with a 'services' section."
+        )
 
     try:
         check_yaml_limits(yaml_string)
@@ -86,20 +88,24 @@ def parse_compose(yaml_string: str) -> dict[str, Any]:
         mark = getattr(exc, "problem_mark", None)
         line = mark.line + 1 if mark is not None else None
         column = mark.column + 1 if mark is not None else None
-        raise ComposeError(f"Invalid YAML: {problem}", line, column) from exc
+        raise ComposeError(f"The YAML is invalid: {problem}.", line, column) from exc
 
     if not isinstance(data, dict):
-        raise ComposeError("Invalid compose file: top level must be a mapping")
+        raise ComposeError(
+            "The top level of the compose file must be a mapping of keys such as 'services'."
+        )
 
     services = data.get("services")
     if not services:
-        raise ComposeError("Invalid compose file: no 'services' defined")
+        raise ComposeError("The compose file needs a 'services' section with at least one service.")
     if not isinstance(services, dict):
-        raise ComposeError("Invalid compose file: 'services' must be a mapping")
+        raise ComposeError("'services' must be a mapping of service names to their settings.")
 
     for name, config in services.items():
         if config is not None and not isinstance(config, dict):
-            raise ComposeError(f"Invalid compose file: service '{name}' must be a mapping")
+            raise ComposeError(
+                f"Service '{name}' must be a mapping of settings such as 'image' and 'ports'."
+            )
 
     return data
 
@@ -114,7 +120,10 @@ def to_k8s_name(name: str) -> str:
         cleaned = NAME_PREFIX + cleaned
     cleaned = cleaned[:DNS_LABEL_MAX].rstrip("-")
     if not cleaned:
-        raise ComposeError(f"Service name '{name}' cannot be turned into a valid K8s name")
+        raise ComposeError(
+            f"Service name '{name}' needs at least one letter or digit to become a "
+            "Kubernetes name. Rename the service."
+        )
     return cleaned
 
 
@@ -123,7 +132,7 @@ def _expect_list(value: Any, field: str, service: str) -> list[Any]:
     if value is None:
         return []
     if not isinstance(value, list):
-        raise ComposeError(f"Service '{service}': '{field}' must be a list")
+        raise ComposeError(f"Service '{service}': '{field}' must be a list.")
     return value
 
 
@@ -132,7 +141,7 @@ def _expect_mapping(value: Any, field: str, service: str) -> dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise ComposeError(f"Service '{service}': '{field}' must be a mapping")
+        raise ComposeError(f"Service '{service}': '{field}' must be a mapping of keys to values.")
     return value
 
 
@@ -145,13 +154,15 @@ def parse_ports(ports: list[Any] | None) -> list[dict[str, Any]]:
     Returns a list of dicts: {"container_port": int, "service_port": int, "protocol": str}.
     """
     if ports is not None and not isinstance(ports, list):
-        raise ComposeError("'ports' and 'expose' must be lists")
+        raise ComposeError("'ports' and 'expose' must each be a list.")
     result: list[dict[str, Any]] = []
     for entry in ports or []:
         if isinstance(entry, dict):
             target = entry.get("target")
             if target is None:
-                raise ComposeError(f"Port entry {entry!r} is missing 'target'")
+                raise ComposeError(
+                    f"Port entry {entry!r} needs a 'target' with the container port."
+                )
             published = entry.get("published") or target
             protocol = str(entry.get("protocol", "tcp"))
             result.append(_port(target, published, protocol, entry))
@@ -166,7 +177,7 @@ def parse_ports(ports: list[Any] | None) -> list[dict[str, Any]]:
         container = parts[-1]
         published = parts[-2] if len(parts) >= 2 and parts[-2] else container
         if "-" in container or "-" in published:
-            raise ComposeError(f"Port ranges are not supported: '{entry}'")
+            raise ComposeError(f"Port entry '{entry}' is a range. List each port separately.")
         result.append(_port(container, published, protocol, entry))
     return result
 
@@ -177,13 +188,18 @@ def _port(container: Any, published: Any, protocol: str, raw: Any) -> dict[str, 
         container_port = int(container)
         service_port = int(published)
     except (TypeError, ValueError) as exc:
-        raise ComposeError(f"Invalid port entry: '{raw}'") from exc
+        raise ComposeError(
+            f"Port entry '{raw}' is invalid. "
+            "Use a port such as '80' or a mapping such as '8080:80'."
+        ) from exc
     for value in (container_port, service_port):
         if not 1 <= value <= 65535:
-            raise ComposeError(f"Port out of range in entry: '{raw}'")
+            raise ComposeError(
+                f"Port entry '{raw}' is out of range. Ports must be between 1 and 65535."
+            )
     protocol = protocol.upper()
     if protocol not in {"TCP", "UDP", "SCTP"}:
-        raise ComposeError(f"Unsupported protocol in port entry: '{raw}'")
+        raise ComposeError(f"Port entry '{raw}' has an unknown protocol. Use tcp, udp or sctp.")
     return {"container_port": container_port, "service_port": service_port, "protocol": protocol}
 
 
@@ -199,15 +215,21 @@ def _environment_pairs(environment: list[Any] | dict[str, Any] | None) -> list[t
     elif isinstance(environment, list):
         for item in environment:
             if item is None:
-                raise ComposeError("'environment' list has an empty entry")
+                raise ComposeError(
+                    "'environment' has an empty entry. Remove it or write it as NAME=value."
+                )
             name, sep, value = str(item).partition("=")
             pairs.append((name, value if sep else None))
     else:
-        raise ComposeError("'environment' must be a list or a mapping")
+        raise ComposeError(
+            "'environment' must be a list of NAME=value entries or a mapping of names to values."
+        )
 
     for name, _ in pairs:
         if not name.strip():
-            raise ComposeError("'environment' has a variable with an empty name")
+            raise ComposeError(
+                "'environment' has a variable with an empty name. Give every variable a name."
+            )
     return [(name.strip(), value) for name, value in pairs]
 
 
@@ -240,11 +262,15 @@ def convert_memory(value: Any) -> str:
     """
     match = MEMORY_PATTERN.match(str(value).strip())
     if not match:
-        raise ComposeError(f"Invalid memory value: '{value}'")
+        raise ComposeError(
+            f"Memory value '{value}' is invalid. Use a number with a unit, such as '512m' or '1g'."
+        )
     number, unit = match.groups()
     unit = unit.lower()
     if unit not in MEMORY_UNITS and unit != "":
-        raise ComposeError(f"Unknown memory unit in '{value}'")
+        raise ComposeError(
+            f"Memory value '{value}' has an unknown unit. Use one of b, k, kb, m, mb, g or gb."
+        )
     if unit in ("", "b"):
         # Decimal, not float: a 400-digit number would otherwise become inf and crash int().
         number_bytes = int(Decimal(number))
@@ -259,15 +285,17 @@ def convert_cpus(value: Any) -> str:
     try:
         cpus = float(value)
     except (TypeError, ValueError) as exc:
-        raise ComposeError(f"Invalid cpus value: '{value}'") from exc
+        raise ComposeError(
+            f"'cpus' value '{value}' is invalid. Use a number such as '0.5' or '2'."
+        ) from exc
     if not math.isfinite(cpus):
-        raise ComposeError(f"Invalid cpus value: '{value}'")
+        raise ComposeError(f"'cpus' value '{value}' is invalid. Use a number such as '0.5' or '2'.")
     if cpus <= 0:
-        raise ComposeError(f"cpus must be greater than 0, got '{value}'")
+        raise ComposeError(f"'cpus' is '{value}', but it must be greater than 0.")
     millicores = round(cpus * 1000)
     if millicores < 1:
         # Below 1 millicore would round to a zero CPU quantity.
-        raise ComposeError(f"cpus must be at least 0.001, got '{value}'")
+        raise ComposeError(f"'cpus' is '{value}', but it must be at least 0.001.")
     if millicores % 1000 == 0:
         return str(millicores // 1000)
     return f"{millicores}m"
@@ -291,7 +319,10 @@ def _command_list(value: Any, field: str, service: str) -> list[str]:
     try:
         return shlex.split(str(value))
     except ValueError as exc:
-        raise ComposeError(f"Service '{service}': could not parse '{field}': {exc}") from exc
+        raise ComposeError(
+            f"Service '{service}': the quoting in '{field}' is broken ({exc}). "
+            f"Close every quote or write '{field}' as a list."
+        ) from exc
 
 
 def _parse_replicas(value: Any, service: str) -> int:
@@ -299,10 +330,15 @@ def _parse_replicas(value: Any, service: str) -> int:
     text = str(value).strip()
     # Not str.isdigit(): that accepts '²' and other characters int() rejects.
     if isinstance(value, bool) or not DIGITS.fullmatch(text):
-        raise ComposeError(f"Service '{service}' has an invalid replicas value: '{value}'")
+        raise ComposeError(
+            f"Service '{service}': replicas must be a whole number such as 3, but it is '{value}'."
+        )
     replicas = int(text)
     if replicas > MAX_REPLICAS:
-        raise ComposeError(f"Service '{service}' has too many replicas: {replicas}")
+        raise ComposeError(
+            f"Service '{service}': replicas is {replicas}, above the Kubernetes limit of "
+            f"{MAX_REPLICAS}."
+        )
     return replicas
 
 
@@ -323,17 +359,26 @@ def parse_duration(value: Any, field: str, service: str) -> int:
     """Compose duration ('1m30s', '500ms', '10s', or a plain number of seconds) to whole
     seconds, rounded up and at least 1, since Kubernetes probes take integer seconds."""
     if isinstance(value, bool):
-        raise ComposeError(f"Service '{service}': invalid duration in '{field}': '{value}'")
+        raise ComposeError(
+            f"Service '{service}': '{field}' must be a duration such as '30s', '1m30s' or "
+            f"'500ms', but it is '{value}'."
+        )
     text = str(value).strip()
     if re.fullmatch(r"\d+(?:\.\d+)?", text):
         seconds = float(text)
     else:
         matches = DURATION.findall(text)
         if not text or "".join(n + u for n, u in matches) != text.replace(" ", ""):
-            raise ComposeError(f"Service '{service}': invalid duration in '{field}': '{value}'")
+            raise ComposeError(
+                f"Service '{service}': '{field}' must be a duration such as '30s', '1m30s' or "
+                f"'500ms', but it is '{value}'."
+            )
         seconds = sum(float(n) * DURATION_SECONDS[u] for n, u in matches)
     if not math.isfinite(seconds) or seconds <= 0:
-        raise ComposeError(f"Service '{service}': invalid duration in '{field}': '{value}'")
+        raise ComposeError(
+            f"Service '{service}': '{field}' must be a duration such as '30s', '1m30s' or "
+            f"'500ms', but it is '{value}'."
+        )
     return max(1, math.ceil(seconds))
 
 
@@ -375,7 +420,10 @@ def convert_healthcheck(name: str, config: dict[str, Any]) -> dict[str, Any] | N
         retries = check["retries"]
         text = str(retries).strip()
         if isinstance(retries, bool) or not DIGITS.fullmatch(text) or int(text) < 1:
-            raise ComposeError(f"Service '{name}': invalid healthcheck.retries: '{retries}'")
+            raise ComposeError(
+                f"Service '{name}': healthcheck.retries must be a whole number of 1 or more, "
+                f"but it is '{retries}'."
+            )
         probe["failureThreshold"] = int(text)
     if check.get("start_period") is not None:
         probe["initialDelaySeconds"] = parse_duration(
@@ -431,7 +479,10 @@ def convert_volumes(
             target = entry.get("target")
             read_only = _is_true(entry.get("read_only", False))
             if not target:
-                raise ComposeError(f"Service '{name}': volume entry {entry!r} is missing 'target'")
+                raise ComposeError(
+                    f"Service '{name}': volume entry {entry!r} needs a 'target' with the path "
+                    "inside the container."
+                )
             target = str(target)
         else:
             parts = str(entry).split(":")
@@ -442,16 +493,21 @@ def convert_volumes(
                 read_only = len(parts) == 3 and "ro" in parts[2].split(",")
                 kind = "bind" if source.startswith(BIND_PREFIXES) else "volume"
             else:
-                raise ComposeError(f"Service '{name}': invalid volume entry '{entry}'")
+                raise ComposeError(
+                    f"Service '{name}': volume entry '{entry}' is invalid. "
+                    "Write it as 'source:target' or 'source:target:ro'."
+                )
         if not target.startswith("/"):
             raise ComposeError(
-                f"Service '{name}': volume target must be an absolute path: '{target}'"
+                f"Service '{name}': volume target '{target}' must be an absolute path "
+                "that starts with '/'."
             )
 
         if kind == "bind":
             notes.append(
-                f"'{name}' bind mount '{source}:{target}' was not converted: Kubernetes has no "
-                "host paths; use a ConfigMap, bake it into the image or use a PersistentVolumeClaim"
+                f"Service '{name}': the bind mount '{source}:{target}' reads files from your "
+                "machine, so it was left out. Put the files in a ConfigMap or in the image. "
+                "You can also mount a PersistentVolumeClaim instead."
             )
         elif kind == "tmpfs":
             pod.add({"name": _mount_name(target), "emptyDir": {"medium": "Memory"}}, target, False)
@@ -464,8 +520,8 @@ def convert_volumes(
             if _is_true(spec.get("external", False)):
                 claim = to_k8s_name(str(spec.get("name") or source))
                 notes.append(
-                    f"'{name}' mounts external volume '{source}': a PersistentVolumeClaim named "
-                    f"'{claim}' must already exist"
+                    f"Service '{name}': volume '{source}' is external, so the manifests only "
+                    f"mount it. Create a PersistentVolumeClaim named '{claim}' before you deploy."
                 )
             else:
                 claims.append(claim)
@@ -473,7 +529,10 @@ def convert_volumes(
                 {"name": claim, "persistentVolumeClaim": {"claimName": claim}}, target, read_only
             )
         else:
-            notes.append(f"'{name}' volume type '{kind}' is not supported and was skipped")
+            notes.append(
+                f"Service '{name}': the converter handles 'volume', 'bind' and 'tmpfs' mounts, "
+                f"so the '{kind}' mount was left out. Add it by hand if you need it."
+            )
     return pod.volumes, pod.mounts, claims, notes
 
 
@@ -494,20 +553,25 @@ def convert_depends_on(
     elif isinstance(depends, list):
         names = [str(d) for d in depends]
     else:
-        raise ComposeError(f"Service '{name}': 'depends_on' must be a list or a mapping")
+        raise ComposeError(
+            f"Service '{name}': 'depends_on' must be a list of service names or a mapping."
+        )
 
     inits: list[dict[str, Any]] = []
     notes: list[str] = []
     for dep in names:
         if dep not in services:
-            raise ComposeError(f"Service '{name}' depends on unknown service '{dep}'")
+            raise ComposeError(
+                f"Service '{name}' depends on '{dep}', but the compose file has no service "
+                "with that name."
+            )
         dep_name = to_k8s_name(dep)
         ports = _service_ports(dep, services[dep] or {}) if include_service else []
         if not ports:
-            why = "has no ports" if include_service else "has no Service (Services were disabled)"
+            why = "has no ports" if include_service else "has no Service (Services are turned off)"
             notes.append(
-                f"'{name}' depends on '{dep}', which {why}: nothing to wait for, so no init "
-                f"container was added; make '{name}' retry its connection"
+                f"Service '{name}' depends on '{dep}', which {why}. Kubernetes can start "
+                f"'{name}' first, so make '{name}' retry its connection to '{dep}'."
             )
             continue
         port = ports[0]["service_port"]
@@ -538,12 +602,13 @@ def _resources(name: str, config: dict[str, Any]) -> tuple[dict[str, dict[str, s
         return resources, None
     if requests:
         return {"requests": requests, "limits": dict(requests)}, (
-            f"'{name}' had reservations but no limits: limits set equal to the reservations"
+            f"Service '{name}' has reservations but no limits. The converter set the limits "
+            "to the reservations. Raise them if the service needs more."
         )
     return {"requests": dict(DEFAULT_REQUESTS), "limits": dict(DEFAULT_LIMITS)}, (
-        f"'{name}' had no resource limits: placeholder requests "
-        f"({DEFAULT_REQUESTS['cpu']}, {DEFAULT_REQUESTS['memory']}) and limits "
-        f"({DEFAULT_LIMITS['cpu']}, {DEFAULT_LIMITS['memory']}) were added; adjust them"
+        f"Service '{name}' has no resource limits, so the converter added placeholder "
+        f"requests ({DEFAULT_REQUESTS['cpu']}, {DEFAULT_REQUESTS['memory']}) and limits "
+        f"({DEFAULT_LIMITS['cpu']}, {DEFAULT_LIMITS['memory']}). Adjust them to fit the service."
     )
 
 
@@ -568,7 +633,10 @@ def convert_service_to_deployment(
     image = config.get("image")
     if not image:
         if "build" not in config:
-            raise ComposeError(f"Service '{name}' has neither 'image' nor 'build'")
+            raise ComposeError(
+                f"Service '{name}' needs an 'image' or a 'build' entry. "
+                "Add one so the converter knows which image to run."
+            )
         # Built locally: assume the image gets tagged with the service name.
         image = f"{k8s_name}:latest"
 
@@ -673,8 +741,9 @@ def convert_service_to_k8s_service(
         if key in seen:
             if seen[key] != port["container_port"]:
                 raise ComposeError(
-                    f"Service '{name}' publishes port {port['service_port']} twice "
-                    f"with different container ports ({seen[key]} and {port['container_port']})"
+                    f"Service '{name}' publishes port {port['service_port']} twice, to "
+                    f"container ports {seen[key]} and {port['container_port']}. "
+                    "Publish each port only once."
                 )
             continue
         seen[key] = port["container_port"]
@@ -701,24 +770,31 @@ def _service_notes(name: str, config: dict[str, Any]) -> list[str]:
     notes: list[str] = []
     k8s_name = to_k8s_name(name)
     if k8s_name != name:
-        notes.append(f"'{name}' was renamed to '{k8s_name}' to be a valid K8s name")
+        notes.append(
+            f"Service '{name}' was renamed to '{k8s_name}' to fit the Kubernetes naming rules."
+        )
     if "build" in config and not config.get("image"):
         notes.append(
-            f"'{name}' uses 'build': image set to '{k8s_name}:latest'; "
-            "build and push it to a registry your cluster can pull from"
+            f"Service '{name}' builds its image, so the converter set the image to "
+            f"'{k8s_name}:latest'. Build and push that image to a registry your cluster can pull "
+            "from."
         )
     if config.get("networks"):
         notes.append(
-            f"'{name}' uses networks: Kubernetes services reach each other by name "
-            "(e.g. http://db:5432), so the networks were left out"
+            f"Service '{name}': its networks were left out. In Kubernetes, services reach "
+            "each other by name, for example http://db:5432."
         )
     if config.get("env_file"):
-        notes.append(f"'{name}' uses env_file: move those values into a ConfigMap or Secret")
+        notes.append(
+            f"Service '{name}' reads variables from env_file, which was left out. "
+            "Move those values into a ConfigMap or a Secret."
+        )
     for var_name, value in _environment_pairs(config.get("environment")):
         if value is None:
             notes.append(
-                f"'{name}' env var '{var_name}' has no value "
-                "(compose reads it from the host); set it or use a Secret"
+                f"Service '{name}': variable '{var_name}' gets its value from the host in "
+                "compose, so the manifest sets it to an empty string. "
+                "Set a value or load it from a Secret."
             )
     return notes
 
@@ -739,10 +815,12 @@ def convert_compose_to_k8s(
     """
     services = compose_dict.get("services") if isinstance(compose_dict, dict) else None
     if not services or not isinstance(services, dict):
-        raise ComposeError("Invalid compose file: no 'services' defined")
+        raise ComposeError("The compose file needs a 'services' section with at least one service.")
     declared_volumes = compose_dict.get("volumes") or {}
     if not isinstance(declared_volumes, dict):
-        raise ComposeError("Invalid compose file: top-level 'volumes' must be a mapping")
+        raise ComposeError(
+            "The top-level 'volumes' section must be a mapping of volume names to their settings."
+        )
     services = {str(name): (config or {}) for name, config in services.items()}
 
     deployments: list[dict[str, Any]] = []
@@ -755,7 +833,8 @@ def convert_compose_to_k8s(
         k8s_name = to_k8s_name(name)
         if k8s_name in used_names:
             raise ComposeError(
-                f"Services '{used_names[k8s_name]}' and '{name}' both map to K8s name '{k8s_name}'"
+                f"Services '{used_names[k8s_name]}' and '{name}' would both get the "
+                f"Kubernetes name '{k8s_name}'. Rename one of them."
             )
         used_names[k8s_name] = name
 
@@ -779,13 +858,15 @@ def convert_compose_to_k8s(
     for claim, users in claim_users.items():
         shared = f", shared by {', '.join(repr(u) for u in users)}" if len(users) > 1 else ""
         notes.append(
-            f"volume '{claim}' became a PersistentVolumeClaim of {DEFAULT_VOLUME_SIZE} "
-            f"(placeholder size, ReadWriteOnce{shared}); adjust it before applying"
+            f"Volume '{claim}' is a ReadWriteOnce PersistentVolumeClaim of "
+            f"{DEFAULT_VOLUME_SIZE}{shared}. The size is a placeholder, so set the real size "
+            "before you deploy."
         )
         if len(users) > 1:
             notes.append(
-                f"'{claim}' is mounted by more than one service: with ReadWriteOnce they must run "
-                "on the same node; use ReadWriteMany storage if they cannot"
+                f"Volume '{claim}' is mounted by more than one service. With ReadWriteOnce, "
+                "their pods must run on the same node. Use ReadWriteMany storage if they need "
+                "to run on different nodes."
             )
 
     namespaces = [] if namespace == "default" else [namespace_manifest(namespace)]

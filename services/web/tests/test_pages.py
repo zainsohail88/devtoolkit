@@ -505,14 +505,14 @@ def test_resolve_log_level():
     assert resolve_log_level(" Debug ") == ("DEBUG", None)
     level, warning = resolve_log_level("loud")
     assert level == "INFO"
-    assert 'Unknown LOG_LEVEL "loud": using info.' in warning
+    assert 'LOG_LEVEL "loud" is unknown, so the service logs at info.' in warning
 
 
 def test_configure_logging_warns_on_unknown_level(caplog):
     assert configure_logging("warning") == "WARNING"
     with caplog.at_level("WARNING", logger="web"):
         assert configure_logging("loud") == "INFO"
-    assert 'Unknown LOG_LEVEL "loud"' in caplog.text
+    assert 'LOG_LEVEL "loud" is unknown' in caplog.text
 
 
 def test_other_http_errors_render_the_error_page(fake_api):
