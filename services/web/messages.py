@@ -3,37 +3,42 @@
 from __future__ import annotations
 
 UNAVAILABLE = "The converter is unavailable right now. Please try again in a minute."
-NOT_UTF8 = "The uploaded file is not UTF-8 text."
+NOT_UTF8 = "DevToolkit reads UTF-8 text files. Save the file as UTF-8 and upload it again."
 EMPTY_YAML = "Paste some YAML or choose a file to upload."
 EMPTY_TEMPLATE = "Paste a template or choose a file to upload."
-TOO_LONG = "The input is longer than {limit:,} characters."
+TOO_LONG = "This is too long to convert. The limit is {limit:,} characters."
 BAD_NAMESPACE = (
-    "Namespace must be lowercase letters, digits and hyphens, at most 63 characters, "
-    "starting and ending with a letter or digit."
+    "Use a namespace of up to 63 lowercase letters, digits and hyphens "
+    "that starts and ends with a letter or digit."
 )
-BAD_OUTPUT = "Output must be manifests or helm."
+BAD_OUTPUT = "Choose Manifests or Helm chart as the output."
 BAD_STACK_NAME = (
-    "Stack name must start with a letter and contain only letters, digits and hyphens, "
-    "at most 128 characters."
+    "Use a stack name of up to 128 letters, digits and hyphens that starts with a letter."
 )
-BAD_PROVIDER = "Provider must be aws or awscc."
-BAD_LAYOUT = "Layout must be files or single."
-CONVERTER_FAILED = "The converter could not process this input."
-VALIDATOR_FAILED = "The validator could not process this input."
+BAD_PROVIDER = "Choose aws or awscc as the Terraform provider."
+BAD_LAYOUT = "Choose split files or one main.tf as the file layout."
+CONVERTER_FAILED = (
+    "Something went wrong while converting this file. Try again. "
+    "If it keeps happening, please open an issue on GitHub."
+)
+VALIDATOR_FAILED = (
+    "Something went wrong while checking this file. Try again. "
+    "If it keeps happening, please open an issue on GitHub."
+)
 
-NOT_FOUND = "There is no page at this address."
-METHOD_NOT_ALLOWED = "That request method is not allowed here."
-BAD_FORM = "The form was not filled in correctly."
+NOT_FOUND = "We could not find that page."
+METHOD_NOT_ALLOWED = "This address only works through the form on its page."
+BAD_FORM = "Some fields are missing or invalid. Check the form and try again."
 HTTP_ERROR_MESSAGES = {404: NOT_FOUND, 405: METHOD_NOT_ALLOWED}
 
 LENGTH_REQUIRED = "Content-Length required"
-TOO_LARGE = "Request too large"
+TOO_LARGE = "The request is too large"
 
 UNKNOWN_LOG_LEVEL = 'Unknown LOG_LEVEL "{value}": using info. Allowed: {allowed}'
 
 NOTES_TITLE = "# Conversion notes"
 NOTES_INTRO = (
-    "Converted from {source} by DevToolkit. The items below need a decision; "
-    "everything else was converted."
+    "DevToolkit converted this {source} template to Terraform. "
+    "Review these items before you apply it."
 )
-NOTES_NONE = "- Nothing: every resource was converted."
+NOTES_NONE = "- Nothing to review. Every resource converted as it is."

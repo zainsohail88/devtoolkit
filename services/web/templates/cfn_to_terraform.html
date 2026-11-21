@@ -5,7 +5,7 @@
 <div class="flex flex-wrap items-end justify-between gap-4">
   <div>
     <h1 class="text-step-2 font-semibold">CloudFormation → Terraform</h1>
-    <p class="mt-1 max-w-measure text-ink-muted">CloudFormation, AWS SAM and <code class="font-mono">cdk synth</code> templates in JSON or YAML. References become Terraform expressions, SAM shortcuts expand the way SAM expands them and whatever converts only in part is listed for you to decide.</p>
+    <p class="mt-1 max-w-measure text-ink-muted">Paste a CloudFormation, AWS SAM or CDK template in JSON or YAML to get Terraform. References turn into Terraform expressions, SAM resources expand the way SAM deploys them and anything that needs your judgement is listed under the result.</p>
   </div>
 </div>
 
@@ -26,22 +26,22 @@
     <div class="editor" data-editor data-placeholder="Resources:&#10;  Bucket:&#10;    Type: AWS::S3::Bucket">
       <textarea name="template" rows="18" spellcheck="false" aria-label="CloudFormation template" class="field font-mono text-small" data-editor-source>{{ template }}</textarea>
     </div>
-    <p class="text-small text-ink-muted">Drop a file onto the editor or press <kbd class="rounded-sm border border-hairline px-1 font-mono">Ctrl</kbd>+<kbd class="rounded-sm border border-hairline px-1 font-mono">Enter</kbd> to convert. For a CDK app, run <code class="font-mono">cdk synth</code> and convert <code class="font-mono">cdk.out/&lt;Stack&gt;.template.json</code>.</p>
+    <p class="text-small text-ink-muted">Drop a file onto the editor or press <kbd class="rounded-sm border border-hairline px-1 font-mono">Ctrl</kbd>+<kbd class="rounded-sm border border-hairline px-1 font-mono">Enter</kbd> to convert. Using CDK? Run <code class="font-mono">cdk synth</code> and paste <code class="font-mono">cdk.out/&lt;Stack&gt;.template.json</code>.</p>
 
     <div class="grid gap-4 rounded-lg border border-divider bg-surface-raised p-4">
       <div class="flex flex-wrap items-end gap-x-6 gap-y-4">
         <fieldset class="grid gap-1 text-small">
-          <legend class="font-medium">Provider</legend>
+          <legend class="font-medium">Terraform provider</legend>
           <div class="flex flex-wrap gap-x-4 pt-1">
-            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="provider" value="aws" {% if provider != 'awscc' %}checked{% endif %}> aws, awscc for the rest</label>
+            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="provider" value="aws" {% if provider != 'awscc' %}checked{% endif %}> aws, with awscc as fallback</label>
             <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="provider" value="awscc" {% if provider == 'awscc' %}checked{% endif %}> awscc only</label>
           </div>
         </fieldset>
         <fieldset class="grid gap-1 text-small">
-          <legend class="font-medium">Files</legend>
+          <legend class="font-medium">File layout</legend>
           <div class="flex flex-wrap gap-x-4 pt-1">
-            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="layout" value="files" {% if layout != 'single' %}checked{% endif %}> One per kind</label>
-            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="layout" value="single" {% if layout == 'single' %}checked{% endif %}> main.tf only</label>
+            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="layout" value="files" {% if layout != 'single' %}checked{% endif %}> Split by kind</label>
+            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="layout" value="single" {% if layout == 'single' %}checked{% endif %}> One main.tf</label>
           </div>
         </fieldset>
       </div>
@@ -52,11 +52,11 @@
         </label>
         <label class="inline-flex min-h-11 items-center gap-2 text-small">
           <input type="checkbox" name="include_imports" value="true" {% if include_imports %}checked{% endif %}>
-          Import blocks for an existing stack
+          Add import blocks for an existing stack
         </label>
         <button type="submit" class="btn btn-primary ml-auto" data-submit>{% include "icons/play.svg" %} Convert</button>
       </div>
-      <p id="stack-name-help" class="text-small text-ink-muted">The stack name is the default for <code class="font-mono">var.stack_name</code>, which stands in for <code class="font-mono">AWS::StackName</code>. Import blocks let Terraform adopt what the stack created.</p>
+      <p id="stack-name-help" class="text-small text-ink-muted">The stack name fills in <code class="font-mono">AWS::StackName</code> through <code class="font-mono">var.stack_name</code>. Import blocks let Terraform take over the resources your stack already created.</p>
     </div>
   </section>
 
