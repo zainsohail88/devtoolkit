@@ -34,8 +34,9 @@ def body_location(b: Builder) -> None:
     """BodyS3Location, which is reported: Terraform reads the body from a local file."""
     if b.props.take("BodyS3Location") is not None:
         b.ctx.note(
-            f"{b.logical_id}: BodyS3Location was not converted; download the OpenAPI file next "
-            'to the Terraform files and set body = file("${path.module}/<file>")'
+            f"{b.logical_id}: BodyS3Location was left out, because Terraform reads the body from "
+            "a local file. Download the OpenAPI file next to the Terraform files and set body = "
+            'file("${path.module}/<file>").'
         )
 
 
@@ -136,9 +137,9 @@ class RestDeployment(ResourceConverter):
             p.set("triggers", {"redeployment": Raw(f"sha1({body})")})
         else:
             b.ctx.note(
-                f"{b.logical_id}: a Terraform deployment is only redeployed when its arguments "
-                "change; add triggers (e.g. a hash of the methods and integrations) so API "
-                "changes get deployed"
+                f"{b.logical_id}: Terraform only redeploys a deployment when its arguments "
+                "change. Add triggers, such as a hash of the methods and integrations, so API "
+                "changes get deployed."
             )
         b.lifecycle.append(Attr("create_before_destroy", True))
         stage_name = p.take("StageName")
@@ -224,8 +225,8 @@ class RestStage(ResourceConverter):
         path = method_path(inner.take("ResourcePath", "/*"), inner.take("HttpMethod", "*"))
         if path is None:
             b.ctx.note(
-                f"{b.logical_id}: MethodSettings[{index - 1}] uses a computed path or method; "
-                "set method_path by hand"
+                f"{b.logical_id}: MethodSettings[{index - 1}] computes its path or method, so "
+                "method_path is '*/*'. Set the right path by hand."
             )
             path = "*/*"
         inner.boolean("metrics_enabled", "MetricsEnabled")

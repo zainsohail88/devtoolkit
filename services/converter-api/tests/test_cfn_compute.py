@@ -42,7 +42,7 @@ def with_hints(resources: dict, hints: dict) -> tuple[str, bool]:
 def test_fixture_converts_everything():
     result = convert_template(FIXTURE.read_text(), stack_name="demo")
     assert result["summary"]["unsupported"] == 0
-    assert not [n for n in result["notes"] if "was not converted" in n]
+    assert not [n for n in result["notes"] if "was left out" in n]
     main = next(f["content"] for f in result["files"] if f["path"] == "main.tf")
     assert 'data "archive_file" "handler_code"' in main
     assert 'filename = "app.py"' in main
@@ -133,12 +133,12 @@ def test_function_without_code_and_image_with_explicit_package_type():
     assert len(re.findall(r'package_type += "Image"', main)) == 1
     assert 'source_kms_key_arn = "k"' in main
     assert 'log_format = "Text"' in main
-    assert any("NoCode had no FunctionName" in n for n in notes)
+    assert any("NoCode: the template leaves out FunctionName" in n for n in notes)
 
 
 def test_unconverted_code_property_is_reported():
     _, notes = convert({"Fn": with_properties(FUNCTION, {"Code": {"Odd": 1}})})
-    assert any("'Fn.Code.Odd' was not converted" in n for n in notes)
+    assert any("'Fn.Code.Odd' yet" in n for n in notes)
 
 
 def test_versions_of_other_functions_do_not_publish():
@@ -256,9 +256,9 @@ def test_instance_devices_interfaces_and_user_data():
     assert "no_device   = true" in main
     assert 'snapshot_id = "snap-1"' in main
     assert 'user_data_base64 = "x"' in main
-    assert any("'Vm.BlockDeviceMappings.Odd' was not converted" in n for n in notes)
+    assert any("'Vm.BlockDeviceMappings.Odd' yet" in n for n in notes)
     for name in ("Vm", "Pair", "Attached", "Odd"):
-        assert any(f"'{name}.NetworkInterfaces' was not converted" in n for n in notes)
+        assert any(f"'{name}.NetworkInterfaces' yet" in n for n in notes)
 
 
 def test_launch_template_without_data():
@@ -518,7 +518,7 @@ def test_primary_interface_kept_on_termination_is_noted():
             },
         }
     )
-    assert '# DeleteOnTermination was not converted: "false"' in main
+    assert '# DeleteOnTermination was left out. CloudFormation value: "false"' in main
     assert sum("primary network interface" in n for n in notes) == 1
 
 
@@ -590,7 +590,7 @@ def test_conditional_container_is_filtered_out_of_the_list():
     assert "item if item != null" in main
     assert re.search(r"local\.on \? \{ [^}]*memory = 64[^}]* \} : null", main)
     assert 'host_path = local.on ? "/var/log" : null' in main
-    assert "# Host was not converted" in main
+    assert "# Host was left out" in main
 
 
 def test_namespace_name_is_noted():
@@ -660,8 +660,8 @@ def test_conditional_alias_routing_and_concurrency():
     assert '"2" = 0.5' in main
     assert "count = local.on ? 1 : 0" in main
     assert "additional_version_weights = {}" in main
-    assert "# AdditionalVersionWeights was not converted" in main
-    assert "# ProvisionedConcurrencyConfig was not converted" in main
+    assert "# AdditionalVersionWeights was left out" in main
+    assert "# ProvisionedConcurrencyConfig was left out" in main
 
 
 def test_conditional_and_computed_block_device_mappings():
@@ -686,9 +686,9 @@ def test_conditional_and_computed_block_device_mappings():
     )
     assert 'dynamic "ebs_block_device" {\n    for_each = local.on ? [1] : []' in main
     assert 'device_name = "/dev/sdf"' in main
-    assert "# BlockDeviceMappings was not converted" in main
+    assert "# BlockDeviceMappings was left out" in main
     assert "ebs_block_device {\n    device_name = null" not in main
-    assert any("'Whole.BlockDeviceMappings' is computed" in n for n in notes)
+    assert any("'Whole.BlockDeviceMappings' comes from a function" in n for n in notes)
 
 
 def test_computed_launch_template_tag_specifications_do_not_crash():
@@ -716,8 +716,8 @@ def test_computed_launch_template_tag_specifications_do_not_crash():
         },
     )
     assert main.count("# TagSpecifications") == 3
-    assert "# TagSpecifications.Tags was not converted" in main
-    assert len([n for n in notes if "is computed by a function" in n]) == 3
+    assert "# TagSpecifications.Tags was left out" in main
+    assert len([n for n in notes if "comes from a function" in n]) == 3
 
 
 EVIL = 'x" ${file("/etc/passwd")} y'
@@ -817,4 +817,4 @@ def test_file_systems_launch_templates_credits_and_placement():
     assert 'launch_template {\n    name    = "lt"\n    version = "1"\n  }' in main
     assert 'cpu_credits = "unlimited"' in main
     assert 'availability_zone = "eu-west-1a"' in main and 'tenancy           = "dedicated"' in main
-    assert not [n for n in notes if "was not converted" in n]
+    assert not [n for n in notes if "was left out" in n]

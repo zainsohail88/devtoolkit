@@ -99,8 +99,8 @@ class AwsccConverter:
         )
         b.props.set(snake(prop), {"s3_bucket": Raw(bucket), "s3_key": Raw(key)})
         self.ctx.note(
-            f"{b.logical_id}: the awscc provider takes Lambda code from S3 only; zip {path}, "
-            f"upload it and set {bucket} and {key}; the aws provider zips it for you"
+            f"{b.logical_id}: the awscc provider reads Lambda code only from S3. Zip {path}, "
+            f"upload it and set {bucket} and {key}. The aws provider zips the code for you."
         )
 
     def value(self, value: Any, path: str) -> Any:
@@ -151,9 +151,10 @@ class AwsccConverter:
                 continue
             if child in self.shapes.missing:
                 self.ctx.note(
-                    f"{self.b.logical_id} ({self.b.info.cfn_type}): property "
-                    f"'{self.b.logical_id}.{child}' is missing from {self.b.info.tf_type} in "
-                    "this provider version and was left out; set it by hand"
+                    f"{self.b.logical_id} ({self.b.info.cfn_type}): {self.b.info.tf_type} in this "
+                    f"awscc provider version has no argument for '{self.b.logical_id}.{child}', "
+                    "so it was left out. Set it outside Terraform or try a newer provider "
+                    "version."
                 )
                 continue
             result[self.shapes.name(child, str(key))] = self.value(item, child)

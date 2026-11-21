@@ -107,7 +107,7 @@ def test_parameter_group_values():
     assert 'value = "1"' in main
     assert "value = var.value" in main
     assert "apply_method" not in main
-    assert any("Computed.Parameters' was not converted" in n for n in notes)
+    assert any("Computed.Parameters' yet" in n for n in notes)
 
 
 def test_cluster_attributes_and_password():
@@ -167,8 +167,10 @@ def test_secret_with_generated_value_is_reported():
         },
         outputs={"Arn": {"Value": {"Ref": "Secret"}}},
     )
-    assert "GenerateSecretString was not converted" in main
-    assert any("random_password and secret_string_wo or convert this secret" in n for n in notes)
+    assert "GenerateSecretString was left out" in main
+    assert any(
+        "random_password and secret_string_wo. You can also convert this secret" in n for n in notes
+    )
     assert "aws_secretsmanager_secret_version" not in main
     assert "aws_secretsmanager_secret.secret.arn" in main
 
@@ -280,7 +282,7 @@ def test_cluster_member_instance_is_a_cluster_instance():
     member = main.split('resource "aws_rds_cluster_instance" "member"')[1]
     assert "final_snapshot" not in member
     assert not any(n.startswith("Member: CloudFormation snapshots") for n in notes)
-    assert not any("not converted" in n for n in notes)
+    assert not any("left out" in n for n in notes)
     for attribute in ("endpoint", "port", "dbi_resource_id", "identifier"):
         assert f"aws_rds_cluster_instance.member.{attribute}" in main
 
@@ -302,4 +304,4 @@ def test_parameter_group_applies_parameters_the_default_way():
     assert 'value = "true"' in main
     assert 'value = "false"' in main
     assert "apply_method" not in main
-    assert any('needs apply_method = "pending-reboot"' in n for n in notes)
+    assert any('Set apply_method = "pending-reboot"' in n for n in notes)

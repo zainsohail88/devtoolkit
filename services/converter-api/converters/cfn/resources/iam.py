@@ -65,10 +65,12 @@ def _inline_policies(b: Builder, kind: str) -> None:
         when, policy = b.ctx.optional_item(item)
         if not isinstance(policy, dict) or intrinsic_name(policy) is not None:
             b.ctx.note(
-                f"{b.logical_id}: inline policy {index} is computed by a function and was not "
-                f"converted; add it as a {tf_type} by hand"
+                f"{b.logical_id}: inline policy {index} comes from a function, so the converter "
+                f"left it out. Add it as a {tf_type} by hand."
             )
-            b.props.comment(f"Policies[{index - 1}] was not converted: {snippet(item)}")
+            b.props.comment(
+                f"Policies[{index - 1}] was left out. CloudFormation value: {snippet(item)}"
+            )
             continue
         name = policy.get("PolicyName")
         label = _literal_text(name) or f"policy_{index}"
@@ -89,10 +91,10 @@ def _managed_policies(b: Builder, kind: str) -> None:
     _, tf_type, argument = _PRINCIPALS[kind]
     if not isinstance(arns, list):
         b.ctx.note(
-            f"{b.logical_id}: ManagedPolicyArns is computed by a function and was not "
-            "converted; attach the policies by hand"
+            f"{b.logical_id}: ManagedPolicyArns comes from a function, so the converter left it "
+            "out. Attach the policies by hand."
         )
-        b.props.comment(f"ManagedPolicyArns was not converted: {snippet(arns)}")
+        b.props.comment(f"ManagedPolicyArns was left out. CloudFormation value: {snippet(arns)}")
         return
     suffixes = UniqueNames()
     for index, item in enumerate(arns, 1):
@@ -186,11 +188,11 @@ class IamPolicy(ResourceConverter):
         if not principals:
             variable = b.ctx.placeholder_variable(
                 f"{b.logical_id}_role",
-                f"Role that {b.logical_id} (AWS::IAM::Policy) is attached to",
+                f"The role to attach {b.logical_id} (AWS::IAM::Policy) to",
             )
             b.ctx.note(
-                f"{b.logical_id} lists no role, user or group Terraform can read; it is "
-                f"attached to {variable} instead"
+                f"{b.logical_id} names no role, user or group that Terraform can read, so the "
+                f"converter attaches it to {variable}. Set that variable to the role name."
             )
             principals = [("role", Raw(variable), None, None)]
         suffixes = UniqueNames()

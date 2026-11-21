@@ -104,10 +104,10 @@ def _list_item(p: Props, item: Any, where: str, tf_type: str) -> tuple[str | Non
     if isinstance(value, dict) and intrinsic_name(value) is None:
         return when, value
     p.ctx.note(
-        f"{p.owner}: '{where}' is computed by a function and was not converted; add the "
-        f"{tf_type} by hand"
+        f"{p.owner}: '{where}' comes from a function, so the converter left it out. Add the "
+        f"{tf_type} by hand."
     )
-    p.comment(f"{where.split('.', 1)[-1]} was not converted: {snippet(item)}")
+    p.comment(f"{where.split('.', 1)[-1]} was left out. CloudFormation value: {snippet(item)}")
     return None, None
 
 
@@ -220,10 +220,10 @@ class SnsTopic(ResourceConverter):
             return
         if not isinstance(subscriptions, list):
             b.ctx.note(
-                f"{b.logical_id}: Subscription is computed by a function and was not "
-                "converted; add aws_sns_topic_subscription resources by hand"
+                f"{b.logical_id}: Subscription comes from a function, so the converter left it "
+                "out. Add aws_sns_topic_subscription resources by hand."
             )
-            p.comment(f"Subscription was not converted: {snippet(subscriptions)}")
+            p.comment(f"Subscription was left out. CloudFormation value: {snippet(subscriptions)}")
             return
         count = sum(not b.ctx.is_no_value(s) for s in subscriptions)
         for index, item in enumerate(subscriptions, 1):
@@ -308,10 +308,10 @@ class EventsRule(ResourceConverter):
             return
         if not isinstance(targets, list):
             b.ctx.note(
-                f"{b.logical_id}: Targets is computed by a function and was not converted; add "
-                "aws_cloudwatch_event_target resources by hand"
+                f"{b.logical_id}: Targets comes from a function, so the converter left it out. "
+                "Add aws_cloudwatch_event_target resources by hand."
             )
-            p.comment(f"Targets was not converted: {snippet(targets)}")
+            p.comment(f"Targets was left out. CloudFormation value: {snippet(targets)}")
             return
         suffixes = UniqueNames()
         for index, item in enumerate(targets, 1):
@@ -576,10 +576,13 @@ class StepFunctionsStateMachine(ResourceConverter):
             p.set("definition", Call("jsonencode", b.ctx.expr(definition)))
         if substitutions is not None:
             b.ctx.note(
-                f"{b.logical_id}: DefinitionSubstitutions could not be applied to this "
-                "definition; replace the ${...} placeholders by hand"
+                f"{b.logical_id}: the converter cannot apply DefinitionSubstitutions to this "
+                "definition. Replace the ${...} placeholders by hand."
             )
-            p.comment(f"DefinitionSubstitutions was not converted: {snippet(substitutions)}")
+            p.comment(
+                "DefinitionSubstitutions was left out. CloudFormation value: "
+                f"{snippet(substitutions)}"
+            )
 
     def fill_logging(self, log: Props) -> None:
         """The logging_configuration block."""

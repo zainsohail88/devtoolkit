@@ -59,7 +59,7 @@ def test_names_must_be_alphanumeric(section, name):
         "Outputs": {"Value": "x"},
     }[section]
     template.setdefault(section, {})[name] = entry
-    with pytest.raises(CfnError, match="letters and digits only"):
+    with pytest.raises(CfnError, match="can only use letters and digits"):
         load_template(json.dumps(template))
 
 
@@ -87,9 +87,9 @@ def test_sam_definition_uri_is_escaped():
 
 
 def test_non_finite_numbers_and_huge_cidr_counts_are_rejected():
-    with pytest.raises(CfnError, match="Invalid number"):
+    with pytest.raises(CfnError, match="infinite or undefined"):
         load_template("Resources: {B: {Type: X, Properties: {V: 1.0e400}}}")
-    with pytest.raises(CfnError, match="Invalid number"):
+    with pytest.raises(CfnError, match="infinite or undefined"):
         load_template('{"Resources": {"B": {"Type": "X", "Properties": {"V": 1e400}}}}')
     with pytest.raises(CfnError, match="at most 256"):
         expression({"Fn::Cidr": ["::/0", 1_000_000, 1]})
@@ -104,7 +104,7 @@ def test_many_colliding_names_stay_linear():
 def test_json_strings_too_deep_or_recursive():
     ctx = Context({"Resources": {}})
     assert ctx.json("[" * 100_000) == "[" * 100_000
-    with pytest.raises(CfnError, match="nested too deeply"):
+    with pytest.raises(CfnError, match="too deeply"):
         ctx.json("[" * 150 + "]" * 150)
 
 

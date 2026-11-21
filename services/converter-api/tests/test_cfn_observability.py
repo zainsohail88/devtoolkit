@@ -78,7 +78,7 @@ def test_metric_filter_values_and_dimensions():
     assert "apply_on_transformed_logs = false" in main
     assert "dimensions    = { for tag in local.on ? [] : [] : tag.Key => tag.Value }" in main
     assert "aws_cloudwatch_log_metric_filter.filter.name" in main
-    assert not [n for n in notes if "not converted" in n]
+    assert not [n for n in notes if "left out" in n]
 
 
 def test_subscription_filter():
@@ -97,7 +97,7 @@ def test_subscription_filter():
     )
     assert 'name               = "${var.stack_name}-Sub"' in main
     assert 'emit_system_fields = ["@aws.region"]' in main
-    assert any("Sub had no FilterName" in n for n in notes)
+    assert any("Sub: the template leaves out FilterName" in n for n in notes)
 
 
 def test_alarm_metric_queries_and_dimension_maps():
@@ -218,7 +218,7 @@ def test_alarm_metric_stat_from_a_function_is_reported():
         },
         parameters={"Stat": {"Type": "String"}, "Metric": {"Type": "String"}},
     )
-    assert "MetricStat was not converted" in main
-    assert "Metric was not converted" in main
-    assert any("Alarm.Metrics[0].MetricStat' is computed" in n for n in notes)
-    assert any("Alarm.Metrics[1].MetricStat.Metric' is computed" in n for n in notes)
+    assert "MetricStat was left out" in main
+    assert "Metric was left out" in main
+    assert any("Alarm.Metrics[0].MetricStat' comes from a function" in n for n in notes)
+    assert any("Alarm.Metrics[1].MetricStat.Metric' comes from a function" in n for n in notes)

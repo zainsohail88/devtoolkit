@@ -154,7 +154,7 @@ def test_auto_delete_with_an_external_bucket_and_kept_conditions():
     drop_tag(resource, "aws-cdk:auto-delete-objects")
     assert resource["Properties"]["Tags"] == [{"Key": "k", "Value": "v"}]
     result = convert_template(json.dumps(template))
-    assert any("Rules of the template were not converted" in n for n in result["notes"])
+    assert any("The Rules section of the template was left out" in n for n in result["notes"])
 
 
 def test_unused_cdk_condition_is_removed_and_empty_policy_dropped():
