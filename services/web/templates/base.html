@@ -17,6 +17,7 @@
         DevToolkit
       </a>
       <a href="/compose-to-k8s" class="nav-link"{% if request.url.path == '/compose-to-k8s' %} aria-current="page"{% endif %}>Compose → Kubernetes</a>
+      <a href="/cfn-to-terraform" class="nav-link"{% if request.url.path == '/cfn-to-terraform' %} aria-current="page"{% endif %}>CloudFormation → Terraform</a>
       <a href="/validate-yaml" class="nav-link"{% if request.url.path == '/validate-yaml' %} aria-current="page"{% endif %}>YAML check</a>
       <div class="ml-auto flex items-center gap-2">
         <a href="https://github.com/zainsohail88/devtoolkit" class="nav-link" aria-label="DevToolkit on GitHub">{% include "icons/github.svg" %}<span class="hidden sm:inline">GitHub</span></a>

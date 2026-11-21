@@ -1,0 +1,233 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: API Gateway REST (v1) and HTTP (v2) APIs.
+Parameters:
+  FunctionArn:
+    Type: String
+    Default: arn:aws:lambda:us-east-1:123456789012:function:orders
+  LogGroupArn:
+    Type: String
+    Default: arn:aws:logs:us-east-1:123456789012:log-group:api
+  Debug:
+    Type: String
+    Default: "false"
+Conditions:
+  Debugging: !Equals [!Ref Debug, "true"]
+Resources:
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: orders-api
+      Description: Orders REST API
+      BinaryMediaTypes: [image/png]
+      MinimumCompressionSize: 1024
+      EndpointConfiguration:
+        Types: [REGIONAL]
+      Tags:
+        - Key: team
+          Value: orders
+  OrdersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: orders
+  GetOrders:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref OrdersResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      RequestParameters:
+        method.request.querystring.limit: false
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+        - !If
+          - Debugging
+          - StatusCode: 500
+          - !Ref AWS::NoValue
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations"
+        TimeoutInMillis: 29000
+        IntegrationResponses:
+          - StatusCode: 200
+            SelectionPattern: ""
+          - !If
+            - Debugging
+            - StatusCode: 500
+              SelectionPattern: "Error.*"
+            - !Ref AWS::NoValue
+  PostOrders:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref OrdersResource
+      HttpMethod: POST
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [GetOrders, PostOrders]
+    Properties:
+      RestApiId: !Ref Api
+      Description: Initial deployment
+  Prod:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref Api
+      DeploymentId: !Ref Deployment
+      StageName: prod
+      Description: Production
+      TracingEnabled: true
+      Variables:
+        mode: live
+      AccessLogSetting:
+        DestinationArn: !Ref LogGroupArn
+        Format: "$context.requestId"
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          MetricsEnabled: true
+          LoggingLevel: INFO
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+        - ResourcePath: "/~1orders"
+          HttpMethod: GET
+          CachingEnabled: false
+        - ResourcePath: /
+          HttpMethod: GET
+          MetricsEnabled: true
+        - !If
+          - Debugging
+          - ResourcePath: "/*"
+            HttpMethod: POST
+            DataTraceEnabled: true
+          - !Ref AWS::NoValue
+  SpecApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Body:
+        openapi: "3.0.1"
+        info:
+          title: spec-api
+          version: "1.0"
+        paths:
+          /ping:
+            get:
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{"statusCode": 200}'
+  SpecDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref SpecApi
+      StageName: v1
+      StageDescription:
+        Description: Version 1
+        TracingEnabled: true
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: orders-http
+      ProtocolType: HTTP
+      Description: Orders HTTP API
+      CorsConfiguration:
+        AllowOrigins: ["https://example.com"]
+        AllowMethods: [GET, POST]
+        AllowHeaders: [authorization]
+        MaxAge: 600
+      Tags:
+        team: orders
+  HttpIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Ref FunctionArn
+      PayloadFormatVersion: "2.0"
+      TimeoutInMillis: 10000
+  Authorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: jwt
+      AuthorizerType: JWT
+      IdentitySource: [$request.header.Authorization]
+      JwtConfiguration:
+        Audience: [orders]
+        Issuer: https://auth.example.com/
+  HttpRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /orders
+      Target: !Sub "integrations/${HttpIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref Authorizer
+      AuthorizationScopes: [orders.read]
+  HttpStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        DetailedMetricsEnabled: true
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+      RouteSettings:
+        GET /orders:
+          ThrottlingBurstLimit: 5
+        GET /debug: !If
+          - Debugging
+          - ThrottlingBurstLimit: 1
+          - !Ref AWS::NoValue
+      AccessLogSettings:
+        DestinationArn: !Ref LogGroupArn
+        Format: "$context.requestId"
+      StageVariables:
+        mode: live
+  SocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: chat
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+  SocketRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SocketApi
+      RouteKey: $connect
+      RequestParameters:
+        route.request.header.Auth:
+          Required: true
+        route.request.querystring.trace: !If
+          - Debugging
+          - Required: false
+          - !Ref AWS::NoValue
+  SpecHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Body:
+        openapi: "3.0.1"
+        info:
+          title: spec-http
+          version: "1.0"
+        paths: {}
+Outputs:
+  RestApiId:
+    Value: !Ref Api
+  StageName:
+    Value: !Ref Prod
+  HttpEndpoint:
+    Value: !GetAtt HttpApi.ApiEndpoint
+  HttpStageName:
+    Value: !Ref HttpStage

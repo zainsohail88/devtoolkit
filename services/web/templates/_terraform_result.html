@@ -1,0 +1,50 @@
+{% include "_messages.html" %}
+{% if files %}
+<div class="mb-3 flex flex-wrap items-center gap-2 text-small" data-summary>
+  <span class="tag">{% include "icons/layers.svg" %} {{ source_labels.get(source, source) }}</span>
+  <span class="text-ink-muted">{{ summary.resources }} resource{{ '' if summary.resources == 1 else 's' }}:</span>
+  {% if summary.aws %}<span class="tag tag-neutral">{{ summary.aws }} aws</span>{% endif %}
+  {% if summary.awscc %}<span class="tag tag-neutral">{{ summary.awscc }} awscc</span>{% endif %}
+  {% if summary.unsupported %}<span class="tag tag-danger">{{ summary.unsupported }} not converted</span>{% endif %}
+</div>
+{% set files_label = '' %}
+{% set files_stacked = true %}
+{% include "_files.html" %}
+{% if resources %}
+<details class="mt-6 rounded-lg border border-divider bg-surface-raised p-4">
+  <summary class="flex min-h-11 cursor-pointer items-center gap-2 font-medium">{% include "icons/list-tree.svg" %} Where each resource went ({{ resources|length }})</summary>
+  <div class="mt-3 overflow-x-auto">
+    <table class="w-full text-left text-small">
+      <thead class="text-ink-muted">
+        <tr><th scope="col" class="py-2 pr-4 font-medium">CloudFormation</th><th scope="col" class="py-2 pr-4 font-medium">Type</th><th scope="col" class="py-2 font-medium">Terraform</th></tr>
+      </thead>
+      <tbody>
+        {% for resource in resources %}
+        <tr class="border-t border-divider">
+          <td class="break-all py-2 pr-4 font-mono">{{ resource.logical_id }}</td>
+          <td class="break-all py-2 pr-4 font-mono text-ink-muted">{{ resource.type }}</td>
+          <td class="break-all py-2 font-mono">{% if resource.address %}{{ resource.address }}{% else %}<span class="tag tag-danger">not converted</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+{% if notes %}
+<section class="mt-6 rounded-lg border border-divider bg-surface-raised p-4" aria-labelledby="notes-heading">
+  <h3 id="notes-heading" class="flex items-center gap-2 font-medium">{% include "icons/info.svg" %} Needs a decision ({{ notes|length }})</h3>
+  <p class="mt-1 text-small text-ink-muted">Everything else was converted. These need you. The zip includes them as CONVERSION_NOTES.md.</p>
+  <ul class="mt-3 grid gap-2 text-small">
+    {% for note in notes %}<li class="flex gap-2"><span class="mt-2 size-1.5 flex-none rounded-full bg-accent"></span><span>{{ note }}</span></li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% elif not error %}
+<div class="grid min-h-72 place-items-center rounded-lg border border-dashed border-hairline p-6 text-center text-small text-ink-muted" data-empty>
+  <div>
+    <span class="mx-auto inline-flex size-10 items-center justify-center rounded-md bg-accent-soft text-ink-on-accent-soft">{% include "icons/folder-open.svg" %}</span>
+    <p class="mt-3">Your Terraform files appear here: <code class="font-mono">versions.tf</code>, <code class="font-mono">variables.tf</code>, <code class="font-mono">main.tf</code> and <code class="font-mono">outputs.tf</code>.</p>
+  </div>
+</div>
+{% endif %}

@@ -75,7 +75,9 @@
       if (pre.dataset.mounted) return;
       const holder = document.createElement("div");
       holder.className = "editor";
-      Editor.create(holder, { doc: pre.textContent, readOnly: true });
+      const path = pre.closest("[data-path]")?.dataset.path || "";
+      const language = path.endsWith(".tf") ? "hcl" : "yaml";
+      Editor.create(holder, { doc: pre.textContent, readOnly: true, language });
       pre.dataset.mounted = "true";
       pre.hidden = true; // kept for Copy and Download, which read its text
       pre.insertAdjacentElement("afterend", holder);
@@ -174,16 +176,15 @@
       });
     });
 
-    // Load an example without leaving the page.
-    const example = form.querySelector("[data-load-example]");
-    if (example) {
+    // Load an example without leaving the page (a page can offer several).
+    form.querySelectorAll("[data-load-example]").forEach((example) => {
       example.addEventListener("click", async (event) => {
         if (!inputEditor) return;
         event.preventDefault();
         const response = await fetch(example.href, { headers: { Accept: "text/plain" } });
         if (response.ok) inputEditor.setValue(await response.text());
       });
-    }
+    });
 
     form.querySelectorAll("[data-editor]").forEach(mountInputEditor);
     if (target) enhanceResult(target);
@@ -206,7 +207,8 @@
     const download = event.target.closest("[data-download]");
     if (download) {
       const text = document.getElementById(download.dataset.download).textContent;
-      const url = URL.createObjectURL(new Blob([text], { type: "application/yaml" }));
+      const type = download.dataset.filename.endsWith(".tf") ? "text/plain" : "application/yaml";
+      const url = URL.createObjectURL(new Blob([text], { type }));
       const link = Object.assign(document.createElement("a"), { href: url, download: download.dataset.filename });
       link.click();
       URL.revokeObjectURL(url);

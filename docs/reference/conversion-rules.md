@@ -1,6 +1,6 @@
 # Conversion rules
 
-How each docker-compose (v3) field becomes Kubernetes. The output is proportional to the input: only the resources the compose file needs are generated, nothing else.
+How each docker-compose (v3) field becomes Kubernetes. The output is proportional to the input: exactly the resources the compose file needs.
 
 ## What is generated
 
@@ -8,8 +8,8 @@ How each docker-compose (v3) field becomes Kubernetes. The output is proportiona
 |---------|------------|------|
 | `services.<name>` | Deployment | Always |
 | `services.<name>.ports` / `expose` | ClusterIP Service | The service has ports and Services are enabled |
-| Named volume (`dbdata:/var/lib/postgresql/data`) | PersistentVolumeClaim, one per volume name | The volume is not `external` |
-| `namespace` other than `default` | Namespace | Requested namespace is not `default` |
+| Named volume (`dbdata:/var/lib/postgresql/data`) | PersistentVolumeClaim, one per volume name | The volume is internal (`external` unset) |
+| `namespace` other than `default` | Namespace | The requested namespace is another one |
 
 Files are written in apply order: Namespace, PersistentVolumeClaims, Deployments, Services.
 
@@ -26,7 +26,7 @@ Files are written in apply order: Namespace, PersistentVolumeClaims, Deployments
 | `deploy.resources.limits` | `resources.limits` |
 | `deploy.resources.reservations` | `resources.requests` |
 | `healthcheck` | `livenessProbe` and `readinessProbe` |
-| `depends_on` | `initContainers` that wait for the dependency's port |
+| `depends_on` | `initContainers` that wait for the port of the dependency |
 | `volumes` | `volumes` + `volumeMounts`, PersistentVolumeClaims for named volumes |
 
 ### Ports
@@ -39,7 +39,7 @@ Files are written in apply order: Namespace, PersistentVolumeClaims, Deployments
 | `"53:53/udp"` | 53/UDP | 53/UDP |
 | `{target: 80, published: 8080}` | 8080 | 80 |
 
-Port ranges (`"3000-3005"`) aren't supported and return an error.
+Port ranges (`"3000-3005"`) return an error.
 
 ### Resources
 
@@ -85,7 +85,7 @@ initContainers:
     command: [sh, -c, "until nc -z db 5432; do sleep 2; done"]
 ```
 
-A dependency without ports (or with Services disabled) can't be waited on, so it is reported as a note instead. A dependency that isn't a service in the file is an error.
+A dependency without ports (or with Services disabled) has nothing to wait on, so it becomes a note. A dependency missing from the services of the file is an error.
 
 ### Volumes
 
@@ -102,11 +102,11 @@ The PVC size is a placeholder and is reported as a note. A named volume mounted 
 
 ## Notes for manual attention
 
-Only what the conversion could not do for you is reported in `notes`:
+`notes` lists what needs you:
 
 | Compose | Note |
 |---------|------|
-| Bind mount | Kubernetes has no host paths; use a ConfigMap, bake it into the image, or a PVC |
+| Bind mount | Kubernetes has no host paths; use a ConfigMap, bake it into the image or use a PVC |
 | `depends_on` a service without ports | Nothing to wait for; make the dependent retry its connection |
 | `networks` | Not needed in Kubernetes; services reach each other by name |
 | `env_file` | Move the values into a ConfigMap or Secret |
@@ -118,11 +118,11 @@ Only what the conversion could not do for you is reported in `notes`:
 
 ## Helm chart
 
-With `output: helm`, the same resources are written as a chart: `Chart.yaml`, a `values.yaml` holding what changes between environments (image, replicas, resources per service; size per volume), and one template per resource. Templates carry no namespace; Helm supplies the release namespace. The chart name comes from the compose file's top-level `name`, or `app`.
+With `output: helm`, the same resources are written as a chart: `Chart.yaml`, a `values.yaml` holding what changes between environments (image, replicas, resources per service; size per volume) and one template per resource. Templates carry no namespace; Helm supplies the release namespace. The chart name comes from the top-level `name` of the compose file, with `app` as the fallback.
 
 ## Names
 
-Kubernetes names must be lowercase letters, digits and `-`, start with a letter, and be at most 63 characters. Invalid names are fixed and noted:
+Kubernetes names must be lowercase letters, digits and `-`, start with a letter and be at most 63 characters. Invalid names are fixed and noted:
 
 - `my_app` becomes `my-app`
 - `1api` becomes `svc-1api`
@@ -131,7 +131,7 @@ If two services end up with the same name, conversion fails with an error.
 
 ## YAML parsing
 
-Values are read the way Docker Compose reads them (YAML 1.2), not the older YAML 1.1 rules:
+Values are read the way Docker Compose reads them, with YAML 1.2 rules:
 
 | Compose | YAML 1.1 would give | DevToolkit gives |
 |---------|---------------------|------------------|

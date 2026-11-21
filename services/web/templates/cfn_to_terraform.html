@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}CloudFormation → Terraform · DevToolkit{% endblock %}
+{% block description %}Convert CloudFormation, AWS SAM and AWS CDK templates into Terraform, with notes on everything that needs a decision.{% endblock %}
+{% block content %}
+<div class="flex flex-wrap items-end justify-between gap-4">
+  <div>
+    <h1 class="text-step-2 font-semibold">CloudFormation → Terraform</h1>
+    <p class="mt-1 max-w-measure text-ink-muted">CloudFormation, AWS SAM and <code class="font-mono">cdk synth</code> templates in JSON or YAML. References become Terraform expressions, SAM shortcuts expand the way SAM expands them and whatever converts only in part is listed for you to decide.</p>
+  </div>
+</div>
+
+<form method="post" action="/cfn-to-terraform" enctype="multipart/form-data" class="mt-6 grid gap-6 lg:grid-cols-2" data-tool-form data-result-target="#result">
+  <section aria-labelledby="input-heading" class="grid min-w-0 content-start gap-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <h2 id="input-heading" class="font-mono text-small font-medium">template.yaml</h2>
+      <div class="flex flex-wrap items-center gap-1">
+        <span class="text-small text-ink-muted">{% include "icons/wand-sparkles.svg" %}<span class="sr-only">Load an example:</span></span>
+        <a href="/cfn-to-terraform?example=cloudformation" class="btn btn-ghost btn-sm" data-load-example>CloudFormation</a>
+        <a href="/cfn-to-terraform?example=sam" class="btn btn-ghost btn-sm" data-load-example>SAM</a>
+        <a href="/cfn-to-terraform?example=cdk" class="btn btn-ghost btn-sm" data-load-example>CDK</a>
+        <label class="btn btn-ghost btn-sm cursor-pointer">{% include "icons/upload.svg" %} Upload
+          <input type="file" name="template_file" accept=".yaml,.yml,.json,.template,text/yaml,application/yaml,application/json" class="sr-only" data-file-input>
+        </label>
+      </div>
+    </div>
+    <div class="editor" data-editor data-placeholder="Resources:&#10;  Bucket:&#10;    Type: AWS::S3::Bucket">
+      <textarea name="template" rows="18" spellcheck="false" aria-label="CloudFormation template" class="field font-mono text-small" data-editor-source>{{ template }}</textarea>
+    </div>
+    <p class="text-small text-ink-muted">Drop a file onto the editor or press <kbd class="rounded-sm border border-hairline px-1 font-mono">Ctrl</kbd>+<kbd class="rounded-sm border border-hairline px-1 font-mono">Enter</kbd> to convert. For a CDK app, run <code class="font-mono">cdk synth</code> and convert <code class="font-mono">cdk.out/&lt;Stack&gt;.template.json</code>.</p>
+
+    <div class="grid gap-4 rounded-lg border border-divider bg-surface-raised p-4">
+      <div class="flex flex-wrap items-end gap-x-6 gap-y-4">
+        <fieldset class="grid gap-1 text-small">
+          <legend class="font-medium">Provider</legend>
+          <div class="flex flex-wrap gap-x-4 pt-1">
+            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="provider" value="aws" {% if provider != 'awscc' %}checked{% endif %}> aws, awscc for the rest</label>
+            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="provider" value="awscc" {% if provider == 'awscc' %}checked{% endif %}> awscc only</label>
+          </div>
+        </fieldset>
+        <fieldset class="grid gap-1 text-small">
+          <legend class="font-medium">Files</legend>
+          <div class="flex flex-wrap gap-x-4 pt-1">
+            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="layout" value="files" {% if layout != 'single' %}checked{% endif %}> One per kind</label>
+            <label class="inline-flex min-h-11 items-center gap-2"><input type="radio" name="layout" value="single" {% if layout == 'single' %}checked{% endif %}> main.tf only</label>
+          </div>
+        </fieldset>
+      </div>
+      <div class="flex flex-wrap items-end gap-x-6 gap-y-4">
+        <label class="grid gap-1 text-small">
+          <span class="font-medium">Stack name <span class="font-normal text-ink-muted">(optional)</span></span>
+          <input type="text" name="stack_name" value="{{ stack_name }}" placeholder="my-stack" pattern="[A-Za-z][A-Za-z0-9\-]{0,127}" class="field w-44 font-mono" aria-describedby="stack-name-help">
+        </label>
+        <label class="inline-flex min-h-11 items-center gap-2 text-small">
+          <input type="checkbox" name="include_imports" value="true" {% if include_imports %}checked{% endif %}>
+          Import blocks for an existing stack
+        </label>
+        <button type="submit" class="btn btn-primary ml-auto" data-submit>{% include "icons/play.svg" %} Convert</button>
+      </div>
+      <p id="stack-name-help" class="text-small text-ink-muted">The stack name is the default for <code class="font-mono">var.stack_name</code>, which stands in for <code class="font-mono">AWS::StackName</code>. Import blocks let Terraform adopt what the stack created.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="result-heading" aria-live="polite" class="grid min-w-0 content-start gap-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <h2 id="result-heading" class="font-mono text-small font-medium">terraform</h2>
+      <button type="submit" class="btn btn-secondary btn-sm" formaction="/cfn-to-terraform/zip" data-zip{% if not files %} hidden{% endif %}>{% include "icons/download.svg" %} Download all (.zip)</button>
+    </div>
+    <div id="result">
+      {% include "_terraform_result.html" %}
+    </div>
+  </section>
+</form>
+{% endblock %}

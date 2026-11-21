@@ -22,114 +22,30 @@ from typing import Any
 
 import yaml
 
-# K8s Service names must be DNS-1035 labels: lowercase alphanumerics and '-', starting with a
-# letter, max 63 chars. Deployments get the same name so labels and selectors line up.
-_DNS_LABEL_MAX = 63
-_INVALID_NAME_CHARS = re.compile(r"[^a-z0-9-]+")
-_NAME_PREFIX = "svc-"
-
-# Upper bound on YAML values, both as written and after aliases are expanded. A real compose
-# file has a few hundred; this stops oversized or "billion laughs" input from eating CPU.
-MAX_NODES = 10_000
-
-# Real compose files nest lists/mappings fewer than 10 levels deep.
-MAX_DEPTH = 100
-
-# libyaml's C parser ships in the PyYAML wheel and is 10-100x faster than the pure-Python
-# one (50,000 nested brackets: ~3ms vs ~0.3s). Fall back if PyYAML was built without it.
-_FAST_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-
-# Deployment spec.replicas is an int32.
-_MAX_REPLICAS = 2**31 - 1
-
-_NULL_TAG = "tag:yaml.org,2002:null"
-_MERGE_TAG = "tag:yaml.org,2002:merge"
-_DIGITS = re.compile(r"[0-9]+")
-
-
-class SafeMergeLoader(_FAST_LOADER):
-    """Safe loader whose `<<` merge keys cost linear, not exponential, time.
-
-    PyYAML copies every merged key/value pair once per reference before de-duplicating, so
-    `a2: {<<: [*a1, *a1, ...]}` chained a few levels deep grows 9x per level (a 500-char
-    input can take minutes). Dropping duplicate keys after each merge keeps it linear. The
-    last occurrence of a key wins, which is the same result PyYAML gives.
-    """
-
-    def flatten_mapping(self, node: yaml.MappingNode) -> None:
-        super().flatten_mapping(node)
-        seen: set[tuple[str, str]] = set()
-        kept: list[tuple[yaml.Node, yaml.Node]] = []
-        for key_node, value_node in reversed(node.value):
-            if isinstance(key_node, yaml.ScalarNode):
-                key = (key_node.tag, key_node.value)
-                if key in seen:
-                    continue
-                seen.add(key)
-            kept.append((key_node, value_node))
-        kept.reverse()
-        node.value = kept
-
-
-class _ComposeLoader(SafeMergeLoader):
-    """Loader that keeps plain scalars as strings, except null and '<<' merge keys.
-
-    PyYAML follows YAML 1.1, where `on` means True, `0755` is octal 493 and an unquoted
-    `22:22` is the base-60 number 1342. Compose uses YAML 1.2, so those values must reach
-    the container unchanged. Keeping the text as-is gives the same result, and numeric
-    fields (ports, replicas, cpus) are converted explicitly below.
-    """
-
-
-_ComposeLoader.yaml_implicit_resolvers = {
-    first_char: [(tag, regexp) for tag, regexp in resolvers if tag in (_NULL_TAG, _MERGE_TAG)]
-    for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
-}
-
-
-def _load_yaml(text: str, loader_class: type[yaml.SafeLoader]) -> Any:
-    """Build the single document in `text` with one of the safe loaders above.
-
-    This is what yaml.load() does internally, spelled out so the loader is visibly a
-    SafeLoader subclass: it can only build the standard YAML types (mappings, lists,
-    strings, numbers, booleans, null), never arbitrary Python objects.
-    """
-    loader = loader_class(text)
-    try:
-        return loader.get_single_data()
-    finally:
-        loader.dispose()
-
-
-def load_yaml_documents(text: str) -> list[Any]:
-    """Build every document in a multi-document YAML string (separated by ---).
-
-    Uses SafeMergeLoader: safe types only, and linear-time `<<` merges. Raises yaml.YAMLError
-    on syntax errors.
-    """
-    loader = SafeMergeLoader(text)
-    try:
-        documents: list[Any] = []
-        while loader.check_data():
-            documents.append(loader.get_data())
-        return documents
-    finally:
-        loader.dispose()
-
-
-# Compose memory units -> K8s binary suffixes. Docker treats these as powers of 1024.
-_MEMORY_UNITS = {
-    "b": "",
-    "k": "Ki",
-    "kb": "Ki",
-    "m": "Mi",
-    "mb": "Mi",
-    "g": "Gi",
-    "gb": "Gi",
-}
-# Applied to a stripped value. No two adjacent repetitions can match the same character, so
-# matching stays linear however long the input is.
-_MEMORY_PATTERN = re.compile(r"^([0-9]+(?:\.[0-9]+)?)[ \t]*([a-zA-Z]*)$")
+from converters.compose_constants import (
+    BIND_PREFIXES,
+    DEFAULT_LIMITS,
+    DEFAULT_REQUESTS,
+    DEFAULT_VOLUME_SIZE,
+    DIGITS,
+    DNS_LABEL_MAX,
+    DURATION,
+    DURATION_SECONDS,
+    INVALID_NAME_CHARS,
+    MANIFEST_ORDER,
+    MAX_REPLICAS,
+    MEMORY_PATTERN,
+    MEMORY_UNITS,
+    NAME_PREFIX,
+    WAIT_IMAGE,
+)
+from converters.yaml_safety import (
+    PlainScalarLoader,
+    YamlLimitError,
+    check_node_count,
+    check_yaml_limits,
+    load_single,
+)
 
 
 class ComposeError(ValueError):
@@ -140,6 +56,7 @@ class ComposeError(ValueError):
     """
 
     def __init__(self, message: str, line: int | None = None, column: int | None = None) -> None:
+        """The user text, and the position in the input for a YAML syntax error."""
         super().__init__(message)
         self.message = message
         # 1-based position in the input, when the error is a YAML syntax error.
@@ -158,17 +75,18 @@ def parse_compose(yaml_string: str) -> dict[str, Any]:
 
     try:
         check_yaml_limits(yaml_string)
-        data = _load_yaml(yaml_string, _ComposeLoader)
+        data = load_single(yaml_string, PlainScalarLoader)
+        check_node_count(data)
+    except YamlLimitError as exc:
+        raise ComposeError(exc.message) from exc
     except yaml.YAMLError as exc:
-        # `problem` is the parser's description of the input ("mapping values are not
+        # `problem` is the description of the input by the parser ("mapping values are not
         # allowed here"). Nothing else from the exception reaches the user.
         problem = getattr(exc, "problem", None) or "syntax error"
         mark = getattr(exc, "problem_mark", None)
         line = mark.line + 1 if mark is not None else None
         column = mark.column + 1 if mark is not None else None
         raise ComposeError(f"Invalid YAML: {problem}", line, column) from exc
-
-    check_node_count(data)
 
     if not isinstance(data, dict):
         raise ComposeError("Invalid compose file: top level must be a mapping")
@@ -186,67 +104,22 @@ def parse_compose(yaml_string: str) -> dict[str, Any]:
     return data
 
 
-def check_yaml_limits(text: str, max_depth: int = MAX_DEPTH, max_nodes: int = MAX_NODES) -> None:
-    """Raise ComposeError if YAML nests deeper than `max_depth` or has over `max_nodes` values.
-
-    Building objects is the expensive part of loading YAML, and it recurses, so `[[[[...]]]]`
-    thousands deep or a 60 KB list of 30,000 items costs about a second of CPU. The parser's
-    event stream is flat and runs in C, so checking it first rejects both in milliseconds.
-    Aliases are counted once here; check_node_count() covers their expanded size.
-
-    Raises yaml.YAMLError for syntax errors, so callers can report them as usual.
-    """
-    depth = 0
-    nodes = 0
-    for event in yaml.parse(text, Loader=_FAST_LOADER):
-        if isinstance(event, yaml.NodeEvent):
-            nodes += 1
-            if nodes > max_nodes:
-                raise ComposeError(f"Input too large: more than {max_nodes} values")
-        if isinstance(event, yaml.CollectionStartEvent):
-            depth += 1
-            if depth > max_depth:
-                raise ComposeError("Invalid YAML: nested too deeply")
-        elif isinstance(event, yaml.CollectionEndEvent):
-            depth -= 1
-
-
-def check_node_count(data: Any, limit: int = MAX_NODES) -> None:
-    """Raise ComposeError if `data` has more than `limit` nodes once aliases are expanded.
-
-    Stops counting as soon as the limit is passed, so even a huge alias bomb is rejected fast.
-    """
-    count = 0
-    stack = [data]
-    while stack:
-        node = stack.pop()
-        count += 1
-        if count > limit:
-            raise ComposeError(
-                f"Input too large: more than {limit} values after expanding YAML aliases"
-            )
-        if isinstance(node, dict):
-            stack.extend(node.keys())
-            stack.extend(node.values())
-        elif isinstance(node, list):
-            stack.extend(node)
-
-
 def to_k8s_name(name: str) -> str:
     """Turn a compose service name into a valid K8s object name.
 
     'My_App' -> 'my-app'. Names must start with a letter, so '1api' -> 'svc-1api'.
     """
-    cleaned = _INVALID_NAME_CHARS.sub("-", str(name).lower()).strip("-")
+    cleaned = INVALID_NAME_CHARS.sub("-", str(name).lower()).strip("-")
     if cleaned and not cleaned[0].isalpha():
-        cleaned = _NAME_PREFIX + cleaned
-    cleaned = cleaned[:_DNS_LABEL_MAX].rstrip("-")
+        cleaned = NAME_PREFIX + cleaned
+    cleaned = cleaned[:DNS_LABEL_MAX].rstrip("-")
     if not cleaned:
         raise ComposeError(f"Service name '{name}' cannot be turned into a valid K8s name")
     return cleaned
 
 
 def _expect_list(value: Any, field: str, service: str) -> list[Any]:
+    """`value` of `field` as a list: [] for None, an error for anything else."""
     if value is None:
         return []
     if not isinstance(value, list):
@@ -255,6 +128,7 @@ def _expect_list(value: Any, field: str, service: str) -> list[Any]:
 
 
 def _expect_mapping(value: Any, field: str, service: str) -> dict[str, Any]:
+    """`value` of `field` as a mapping: {} for None, an error for anything else."""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -298,6 +172,7 @@ def parse_ports(ports: list[Any] | None) -> list[dict[str, Any]]:
 
 
 def _port(container: Any, published: Any, protocol: str, raw: Any) -> dict[str, Any]:
+    """One checked port mapping; `raw` is the compose entry, for error messages."""
     try:
         container_port = int(container)
         service_port = int(published)
@@ -349,6 +224,7 @@ def parse_environment(environment: list[Any] | dict[str, Any] | None) -> list[di
 
 
 def _env_value(value: Any) -> str:
+    """An environment value as the text the container gets."""
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -362,12 +238,12 @@ def convert_memory(value: Any) -> str:
 
     '512M' -> '512Mi', '1g' -> '1Gi', 268435456 (bytes) -> '256Mi'.
     """
-    match = _MEMORY_PATTERN.match(str(value).strip())
+    match = MEMORY_PATTERN.match(str(value).strip())
     if not match:
         raise ComposeError(f"Invalid memory value: '{value}'")
     number, unit = match.groups()
     unit = unit.lower()
-    if unit not in _MEMORY_UNITS and unit != "":
+    if unit not in MEMORY_UNITS and unit != "":
         raise ComposeError(f"Unknown memory unit in '{value}'")
     if unit in ("", "b"):
         # Decimal, not float: a 400-digit number would otherwise become inf and crash int().
@@ -375,7 +251,7 @@ def convert_memory(value: Any) -> str:
         if number_bytes % (1024 * 1024) == 0:
             return f"{number_bytes // (1024 * 1024)}Mi"
         return str(number_bytes)
-    return f"{number}{_MEMORY_UNITS[unit]}"
+    return f"{number}{MEMORY_UNITS[unit]}"
 
 
 def convert_cpus(value: Any) -> str:
@@ -398,6 +274,7 @@ def convert_cpus(value: Any) -> str:
 
 
 def _convert_resource_block(block: Any, field: str, service: str) -> dict[str, str]:
+    """A deploy.resources limits or reservations block as K8s cpu and memory."""
     block = _expect_mapping(block, field, service)
     resources: dict[str, str] = {}
     if block.get("cpus") is not None:
@@ -408,6 +285,7 @@ def _convert_resource_block(block: Any, field: str, service: str) -> dict[str, s
 
 
 def _command_list(value: Any, field: str, service: str) -> list[str]:
+    """`entrypoint` or `command` as a list: a list as it is, a string split like a shell."""
     if isinstance(value, list):
         return [str(part) for part in value]
     try:
@@ -417,34 +295,21 @@ def _command_list(value: Any, field: str, service: str) -> list[str]:
 
 
 def _parse_replicas(value: Any, service: str) -> int:
+    """deploy.replicas as a checked int32."""
     text = str(value).strip()
     # Not str.isdigit(): that accepts '²' and other characters int() rejects.
-    if isinstance(value, bool) or not _DIGITS.fullmatch(text):
+    if isinstance(value, bool) or not DIGITS.fullmatch(text):
         raise ComposeError(f"Service '{service}' has an invalid replicas value: '{value}'")
     replicas = int(text)
-    if replicas > _MAX_REPLICAS:
+    if replicas > MAX_REPLICAS:
         raise ComposeError(f"Service '{service}' has too many replicas: {replicas}")
     return replicas
 
 
 def _service_ports(name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
-    """All port mappings from a service's `ports` and `expose` lists."""
+    """All port mappings from the `ports` and `expose` lists of a service."""
     ports = parse_ports(_expect_list(config.get("ports"), "ports", name))
     return ports + parse_ports(_expect_list(config.get("expose"), "expose", name))
-
-
-# Placeholder resources, added when a service declares none. Kubernetes schedules an
-# unbounded pod otherwise; the note tells the user these are starting points.
-DEFAULT_REQUESTS = {"cpu": "100m", "memory": "128Mi"}
-DEFAULT_LIMITS = {"cpu": "500m", "memory": "512Mi"}
-# Named volumes become PersistentVolumeClaims of this size; the note says to adjust it.
-DEFAULT_VOLUME_SIZE = "1Gi"
-# Init containers that wait for a dependency's port. Pinned, tiny, has `nc`.
-WAIT_IMAGE = "busybox:1.37"
-
-_DURATION = re.compile(r"(\d+(?:\.\d+)?)(ms|us|µs|ns|h|m|s)")
-_DURATION_SECONDS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1, "m": 60, "h": 3600}
-_BIND_PREFIXES = ("/", "./", "../", "~")
 
 
 def _is_true(value: Any) -> bool:
@@ -463,10 +328,10 @@ def parse_duration(value: Any, field: str, service: str) -> int:
     if re.fullmatch(r"\d+(?:\.\d+)?", text):
         seconds = float(text)
     else:
-        matches = _DURATION.findall(text)
+        matches = DURATION.findall(text)
         if not text or "".join(n + u for n, u in matches) != text.replace(" ", ""):
             raise ComposeError(f"Service '{service}': invalid duration in '{field}': '{value}'")
-        seconds = sum(float(n) * _DURATION_SECONDS[u] for n, u in matches)
+        seconds = sum(float(n) * DURATION_SECONDS[u] for n, u in matches)
     if not math.isfinite(seconds) or seconds <= 0:
         raise ComposeError(f"Service '{service}': invalid duration in '{field}': '{value}'")
     return max(1, math.ceil(seconds))
@@ -509,7 +374,7 @@ def convert_healthcheck(name: str, config: dict[str, Any]) -> dict[str, Any] | N
     if check.get("retries") is not None:
         retries = check["retries"]
         text = str(retries).strip()
-        if isinstance(retries, bool) or not _DIGITS.fullmatch(text) or int(text) < 1:
+        if isinstance(retries, bool) or not DIGITS.fullmatch(text) or int(text) < 1:
             raise ComposeError(f"Service '{name}': invalid healthcheck.retries: '{retries}'")
         probe["failureThreshold"] = int(text)
     if check.get("start_period") is not None:
@@ -520,8 +385,30 @@ def convert_healthcheck(name: str, config: dict[str, Any]) -> dict[str, Any] | N
 
 
 def _mount_name(target: str) -> str:
-    cleaned = _INVALID_NAME_CHARS.sub("-", target.lower()).strip("-")
-    return (cleaned or "data")[:_DNS_LABEL_MAX].rstrip("-")
+    """A pod volume name from a mount path."""
+    cleaned = INVALID_NAME_CHARS.sub("-", target.lower()).strip("-")
+    return (cleaned or "data")[:DNS_LABEL_MAX].rstrip("-")
+
+
+class PodVolumes:
+    """The pod volumes and container mounts of one service. The same volume mounted at
+    two paths is one pod volume with two mounts."""
+
+    def __init__(self) -> None:
+        """No volumes yet."""
+        self.volumes: list[dict[str, Any]] = []
+        self.mounts: list[dict[str, Any]] = []
+        self.used: set[str] = set()
+
+    def add(self, volume: dict[str, Any], target: str, read_only: bool) -> None:
+        """Mount `volume` at `target`, adding it to the pod the first time."""
+        if volume["name"] not in self.used:
+            self.used.add(volume["name"])
+            self.volumes.append(volume)
+        mount: dict[str, Any] = {"name": volume["name"], "mountPath": target}
+        if read_only:
+            mount["readOnly"] = True
+        self.mounts.append(mount)
 
 
 def convert_volumes(
@@ -534,22 +421,9 @@ def convert_volumes(
     equivalent and are reported as notes.
     """
     entries = _expect_list(config.get("volumes"), "volumes", name)
-    volumes: list[dict[str, Any]] = []
-    mounts: list[dict[str, Any]] = []
+    pod = PodVolumes()
     claims: list[str] = []
     notes: list[str] = []
-    used: set[str] = set()
-
-    def add(volume: dict[str, Any], target: str, read_only: bool) -> None:
-        # The same volume mounted at two paths is one pod volume with two mounts.
-        if volume["name"] not in used:
-            used.add(volume["name"])
-            volumes.append(volume)
-        mount: dict[str, Any] = {"name": volume["name"], "mountPath": target}
-        if read_only:
-            mount["readOnly"] = True
-        mounts.append(mount)
-
     for entry in entries:
         if isinstance(entry, dict):
             kind = str(entry.get("type", "volume"))
@@ -566,7 +440,7 @@ def convert_volumes(
             elif len(parts) in (2, 3):
                 source, target = parts[0], parts[1]
                 read_only = len(parts) == 3 and "ro" in parts[2].split(",")
-                kind = "bind" if source.startswith(_BIND_PREFIXES) else "volume"
+                kind = "bind" if source.startswith(BIND_PREFIXES) else "volume"
             else:
                 raise ComposeError(f"Service '{name}': invalid volume entry '{entry}'")
         if not target.startswith("/"):
@@ -577,12 +451,12 @@ def convert_volumes(
         if kind == "bind":
             notes.append(
                 f"'{name}' bind mount '{source}:{target}' was not converted: Kubernetes has no "
-                "host paths; use a ConfigMap, bake it into the image, or a PersistentVolumeClaim"
+                "host paths; use a ConfigMap, bake it into the image or use a PersistentVolumeClaim"
             )
         elif kind == "tmpfs":
-            add({"name": _mount_name(target), "emptyDir": {"medium": "Memory"}}, target, False)
+            pod.add({"name": _mount_name(target), "emptyDir": {"medium": "Memory"}}, target, False)
         elif kind == "volume" and not source:
-            add({"name": _mount_name(target), "emptyDir": {}}, target, read_only)
+            pod.add({"name": _mount_name(target), "emptyDir": {}}, target, read_only)
         elif kind == "volume":
             claim = to_k8s_name(str(source))
             spec = declared.get(str(source)) if isinstance(declared, dict) else None
@@ -595,16 +469,18 @@ def convert_volumes(
                 )
             else:
                 claims.append(claim)
-            add({"name": claim, "persistentVolumeClaim": {"claimName": claim}}, target, read_only)
+            pod.add(
+                {"name": claim, "persistentVolumeClaim": {"claimName": claim}}, target, read_only
+            )
         else:
             notes.append(f"'{name}' volume type '{kind}' is not supported and was skipped")
-    return volumes, mounts, claims, notes
+    return pod.volumes, pod.mounts, claims, notes
 
 
 def convert_depends_on(
     name: str, config: dict[str, Any], services: dict[str, Any], include_service: bool
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Compose `depends_on` -> init containers that wait for each dependency's first port.
+    """Compose `depends_on` -> init containers that wait for the first port of each dependency.
 
     Kubernetes starts pods in any order; an init container that blocks until the dependency
     answers on its Service port gives the same effect. Dependencies without ports (or when
@@ -631,13 +507,13 @@ def convert_depends_on(
             why = "has no ports" if include_service else "has no Service (Services were disabled)"
             notes.append(
                 f"'{name}' depends on '{dep}', which {why}: nothing to wait for, so no init "
-                "container was added; make '{name}' retry its connection"
+                f"container was added; make '{name}' retry its connection"
             )
             continue
         port = ports[0]["service_port"]
         inits.append(
             {
-                "name": f"wait-for-{dep_name}"[:_DNS_LABEL_MAX].rstrip("-"),
+                "name": f"wait-for-{dep_name}"[:DNS_LABEL_MAX].rstrip("-"),
                 "image": WAIT_IMAGE,
                 "command": ["sh", "-c", f"until nc -z {dep_name} {port}; do sleep 2; done"],
             }
@@ -766,6 +642,7 @@ def convert_service_to_deployment(
 def persistent_volume_claim(
     name: str, namespace: str, size: str = DEFAULT_VOLUME_SIZE
 ) -> dict[str, Any]:
+    """A ReadWriteOnce PersistentVolumeClaim of `size`."""
     return {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
@@ -775,13 +652,14 @@ def persistent_volume_claim(
 
 
 def namespace_manifest(namespace: str) -> dict[str, Any]:
+    """A Namespace manifest."""
     return {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}}
 
 
 def convert_service_to_k8s_service(
     name: str, config: dict[str, Any] | None, namespace: str = "default"
 ) -> dict[str, Any] | None:
-    """Build a ClusterIP Service for a compose service's ports. Returns None if it has no ports."""
+    """Build a ClusterIP Service for the ports of a compose service, or None without ports."""
     config = config or {}
     ports = _service_ports(name, config)
     if not ports:
@@ -831,8 +709,8 @@ def _service_notes(name: str, config: dict[str, Any]) -> list[str]:
         )
     if config.get("networks"):
         notes.append(
-            f"'{name}' uses networks: not needed in Kubernetes, services reach each other "
-            "by name (e.g. http://db:5432)"
+            f"'{name}' uses networks: Kubernetes services reach each other by name "
+            "(e.g. http://db:5432), so the networks were left out"
         )
     if config.get("env_file"):
         notes.append(f"'{name}' uses env_file: move those values into a ConfigMap or Secret")
@@ -850,7 +728,7 @@ def convert_compose_to_k8s(
 ) -> dict[str, Any]:
     """Convert a parsed compose file into K8s manifests.
 
-    Output is proportional to the input: a Namespace only when it isn't `default`, a
+    Output is proportional to the input: a Namespace only when it is not `default`, a
     PersistentVolumeClaim per named volume, a Deployment per service, and a Service per
     service with ports.
 
@@ -907,7 +785,7 @@ def convert_compose_to_k8s(
         if len(users) > 1:
             notes.append(
                 f"'{claim}' is mounted by more than one service: with ReadWriteOnce they must run "
-                "on the same node; use ReadWriteMany storage if they can't"
+                "on the same node; use ReadWriteMany storage if they cannot"
             )
 
     namespaces = [] if namespace == "default" else [namespace_manifest(namespace)]
@@ -925,9 +803,5 @@ def convert_compose_to_k8s(
 def manifests_to_yaml(manifests: dict[str, list[dict[str, Any]]]) -> str:
     """Render manifests as one multi-document YAML string, in apply order: Namespace,
     PersistentVolumeClaims, Deployments, Services."""
-    documents = [
-        doc
-        for kind in ("namespaces", "persistent_volume_claims", "deployments", "services")
-        for doc in manifests.get(kind, [])
-    ]
+    documents = [doc for kind in MANIFEST_ORDER for doc in manifests.get(kind, [])]
     return yaml.safe_dump_all(documents, sort_keys=False, default_flow_style=False)

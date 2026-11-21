@@ -9,7 +9,9 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from main import MAX_INPUT_CHARS, app, configure_logging, resolve_log_level
+import main
+from main import app, configure_logging, resolve_log_level
+from schemas import MAX_INPUT_CHARS
 
 client = TestClient(app)
 
@@ -132,7 +134,7 @@ def test_resolve_log_level_unknown_falls_back_to_info():
 
 def test_unknown_log_level_does_not_crash_startup():
     # Importing main with a bad LOG_LEVEL used to raise "ValueError: Unknown level".
-    env = {**os.environ, "LOG_LEVEL": "verbose"}
+    env = dict(os.environ, LOG_LEVEL="verbose")
     service_dir = Path(__file__).resolve().parents[1]  # works from any working directory
     result = subprocess.run(
         [sys.executable, "-c", "import main"],
@@ -229,3 +231,83 @@ def test_convert_error_carries_line_and_column_for_yaml_syntax_errors():
     response = client.post("/convert/compose-to-k8s/files", json={"compose_yaml": "services: {}"})
     assert response.status_code == 400
     assert "line" not in response.json()
+
+
+# --- CloudFormation -> Terraform ---------------------------------------------------------
+
+CFN = (
+    "Resources:\n"
+    "  Bucket:\n"
+    "    Type: AWS::S3::Bucket\n"
+    "    Properties:\n"
+    "      BucketName: !Sub '${AWS::StackName}-b'\n"
+)
+
+
+def test_cfn_to_terraform():
+    response = client.post(
+        "/convert/cfn-to-terraform", json={"template": CFN, "stack_name": "shop"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True and body["source"] == "cloudformation"
+    paths = [f["path"] for f in body["files"]]
+    assert paths == ["versions.tf", "variables.tf", "main.tf"]
+    assert 'resource "aws_s3_bucket" "bucket"' in body["files"][2]["content"]
+    assert 'default     = "shop"' in body["files"][1]["content"]
+    assert body["summary"] == {"resources": 1, "aws": 1, "awscc": 0, "unsupported": 0}
+    assert body["resources"] == [
+        {
+            "logical_id": "Bucket",
+            "type": "AWS::S3::Bucket",
+            "address": "aws_s3_bucket.bucket",
+            "status": "aws",
+        }
+    ]
+
+
+def test_cfn_to_terraform_options():
+    response = client.post(
+        "/convert/cfn-to-terraform",
+        json={"template": CFN, "provider": "awscc", "layout": "single", "include_imports": True},
+    )
+    body = response.json()
+    assert [f["path"] for f in body["files"]] == ["main.tf"]
+    assert (
+        "awscc_s3_bucket" in body["files"][0]["content"]
+        and "import {" in body["files"][0]["content"]
+    )
+
+
+def test_cfn_to_terraform_rejects_bad_templates_with_position():
+    response = client.post("/convert/cfn-to-terraform", json={"template": "Resources: [1\n"})
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False and body["error"].startswith("Invalid YAML")
+    assert body["line"] == 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"template": CFN, "provider": "google"},
+        {"template": CFN, "layout": "tree"},
+        {"template": CFN, "stack_name": "1-bad"},
+        {"template": "x" * 500_001},
+    ],
+)
+def test_cfn_to_terraform_validation(payload):
+    assert client.post("/convert/cfn-to-terraform", json=payload).status_code == 422
+
+
+def broken_convert(template, provider, layout, stack_name, include_imports):
+    raise KeyError("x")
+
+
+def test_cfn_to_terraform_unexpected_shape_is_a_400(monkeypatch, caplog):
+    monkeypatch.setattr(main, "convert_template", broken_convert)
+    with caplog.at_level("ERROR", logger="converter-api"):
+        response = client.post("/convert/cfn-to-terraform", json={"template": CFN})
+    assert response.status_code == 400
+    assert "cannot handle yet" in response.json()["error"]
+    assert "unexpected template shape" in caplog.text

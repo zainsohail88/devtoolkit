@@ -1,0 +1,259 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Queues, topics, event rules, streams and a state machine
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+Resources:
+  DeadLetters:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-dlq.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      DeduplicationScope: messageGroup
+      FifoThroughputLimit: perMessageGroupId
+      MessageRetentionPeriod: 1209600
+      RedriveAllowPolicy:
+        redrivePermission: allowAll
+  Orders:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders.fifo
+      FifoQueue: "true"
+      VisibilityTimeout: "60"
+      DelaySeconds: 0
+      MaximumMessageSize: 262144
+      ReceiveMessageWaitTimeSeconds: 20
+      KmsMasterKeyId: alias/aws/sqs
+      KmsDataKeyReusePeriodSeconds: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetters.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: app
+          Value: shop
+  Plain:
+    Type: AWS::SQS::Queue
+    Properties:
+      SqsManagedSseEnabled: true
+  OrdersPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref Orders
+        - !If [IsProd, !Ref Plain, !Ref AWS::NoValue]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt Orders.Arn
+  Alerts:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: alerts
+      DisplayName: Alerts
+      KmsMasterKeyId: alias/aws/sns
+      SignatureVersion: "2"
+      TracingConfig: Active
+      DeliveryPolicy:
+        http:
+          defaultHealthyRetryPolicy:
+            numRetries: 3
+      Subscription:
+        - Protocol: email
+          Endpoint: ops@example.com
+        - Protocol: sqs
+          Endpoint: !GetAtt Plain.Arn
+      Tags:
+        - Key: app
+          Value: shop
+  FifoTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: events.fifo
+      FifoTopic: true
+      ContentBasedDeduplication: true
+      FifoThroughputScope: MessageGroup
+      ArchivePolicy:
+        MessageRetentionPeriod: "30"
+  PlainSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref Alerts
+      Protocol: sqs
+      Endpoint: !GetAtt Plain.Arn
+      RawMessageDelivery: "true"
+      FilterPolicyScope: MessageAttributes
+      FilterPolicy:
+        severity: [high]
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetters.Arn
+  AlertsPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref Alerts
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref Alerts
+  Bus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: shop-bus
+      Description: Shop events
+      DeadLetterConfig:
+        Arn: !GetAtt DeadLetters.Arn
+      LogConfig:
+        IncludeDetail: FULL
+        Level: INFO
+      Policy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccount
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: events:PutEvents
+            Resource: !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/shop-bus
+      Tags:
+        - Key: app
+          Value: shop
+  OrderPlaced:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: order-placed
+      Description: Orders to the queue and topic
+      EventBusName: !Ref Bus
+      State: ENABLED
+      EventPattern:
+        source: [shop.orders]
+        detail-type: [OrderPlaced]
+      Targets:
+        - Id: queue
+          Arn: !GetAtt Orders.Arn
+          SqsParameters:
+            MessageGroupId: orders
+          DeadLetterConfig:
+            Arn: !GetAtt DeadLetters.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 3
+        - Id: topic
+          Arn: !Ref Alerts
+          InputTransformer:
+            InputPathsMap:
+              id: $.detail.id
+            InputTemplate: '"Order <id> placed"'
+        - Id: stream
+          Arn: !GetAtt Clicks.Arn
+          RoleArn: !GetAtt EventsRole.Arn
+          KinesisParameters:
+            PartitionKeyPath: $.detail.id
+  Nightly:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 day)
+      Targets:
+        - Id: machine
+          Arn: !Ref Workflow
+          RoleArn: !GetAtt EventsRole.Arn
+          Input: '{"mode": "nightly"}'
+  EventsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [events.amazonaws.com, states.amazonaws.com]
+            Action: sts:AssumeRole
+  Clicks:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: clicks
+      ShardCount: 2
+      RetentionPeriodHours: 48
+      DesiredShardLevelMetrics: [IncomingBytes]
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+      StreamModeDetails:
+        StreamMode: PROVISIONED
+      Tags:
+        - Key: app
+          Value: shop
+  OnDemand:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      StreamModeDetails:
+        StreamMode: ON_DEMAND
+  WorkflowLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 7
+  Workflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: order-workflow
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt EventsRole.Arn
+      Definition:
+        StartAt: Notify
+        States:
+          Notify:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: ${TopicArn}
+              Message.$: $.message
+            End: true
+      DefinitionSubstitutions:
+        TopicArn: !Ref Alerts
+      LoggingConfiguration:
+        Level: ERROR
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt WorkflowLogs.Arn
+      TracingConfiguration:
+        Enabled: true
+      Tags:
+        - Key: app
+          Value: shop
+  LegacyWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt EventsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "StartAt": "Wait",
+          "States": {
+            "Wait": {"Type": "Wait", "Seconds": 5, "Next": "Done"},
+            "Done": {"Type": "Pass", "Result": "${AWS::Region}", "End": true}
+          }
+        }
+Outputs:
+  QueueUrl:
+    Value: !Ref Orders
+  QueueName:
+    Value: !GetAtt Orders.QueueName
+  TopicArn:
+    Value: !Ref Alerts
+  StreamArn:
+    Value: !GetAtt Clicks.Arn
+  BusArn:
+    Value: !GetAtt Bus.Arn
+  WorkflowArn:
+    Value: !Ref Workflow

@@ -1,9 +1,26 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "../converter-api"]
 
 [tool.coverage.run]
-source = ["main", "api_client"]
+source = [
+    "api_client",
+    "archives",
+    "conversions",
+    "error_pages",
+    "errors",
+    "examples",
+    "inputs",
+    "log_config",
+    "main",
+    "messages",
+    "middleware",
+    "models",
+    "rendering",
+    "routes",
+    "security",
+    "settings",
+]
 
 [tool.ruff]
 line-length = 100

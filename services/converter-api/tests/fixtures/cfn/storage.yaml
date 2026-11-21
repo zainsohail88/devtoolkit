@@ -1,0 +1,310 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: S3, DynamoDB and ECR with most of their options
+Parameters:
+  Retention:
+    Type: Number
+    Default: 90
+Conditions:
+  WithWebsite: !Equals [!Ref AWS::Region, us-east-1]
+Resources:
+  Logs:
+    Type: AWS::S3::Bucket
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      AccessControl: LogDeliveryWrite
+  Assets:
+    Type: AWS::S3::Bucket
+    DependsOn: AssetsPermission
+    Properties:
+      BucketName: !Sub "assets-${AWS::AccountId}"
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 30
+      VersioningConfiguration:
+        Status: Enabled
+      AccelerateConfiguration:
+        AccelerationStatus: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: alias/aws/s3
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref Logs
+        LogFilePrefix: assets/
+      LifecycleConfiguration:
+        Rules:
+          - Id: archive
+            Status: Enabled
+            Prefix: reports/
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+            Transition:
+              StorageClass: GLACIER
+              TransitionInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 365
+              NewerNoncurrentVersions: 3
+            NoncurrentVersionTransitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 30
+                NewerNoncurrentVersions: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Status: Enabled
+            TagFilters:
+              - Key: temp
+                Value: "true"
+            ExpirationInDays: !Ref Retention
+          - Status: Enabled
+            Prefix: tmp/
+            ObjectSizeGreaterThan: 1024
+            ExpirationDate: "2030-01-01T00:00:00Z"
+          - Status: Enabled
+            ObjectSizeLessThan: 128
+            ExpiredObjectDeleteMarker: true
+          - Status: Enabled
+            ObjectSizeGreaterThan: 10
+            NoncurrentVersionExpirationInDays: 30
+          - Id: conditional
+            Status: Enabled
+            Prefix: media/
+            Transitions:
+              - !If
+                - WithWebsite
+                - StorageClass: GLACIER
+                  TransitionInDays: 60
+                - !Ref AWS::NoValue
+            NoncurrentVersionExpiration: !If
+              - WithWebsite
+              - NoncurrentDays: 30
+              - !Ref AWS::NoValue
+            AbortIncompleteMultipartUpload: !If
+              - WithWebsite
+              - DaysAfterInitiation: 3
+              - !Ref AWS::NoValue
+      CorsConfiguration:
+        CorsRules:
+          - Id: web
+            AllowedMethods: [GET, HEAD]
+            AllowedOrigins: ["https://example.com"]
+            AllowedHeaders: ["*"]
+            ExposedHeaders: [ETag]
+            MaxAge: "3600"
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: arn:aws:lambda:us-east-1:123456789012:function:resize
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+                  - Name: suffix
+                    Value: .jpg
+        QueueConfigurations:
+          - Event: s3:ObjectRemoved:*
+            Queue: arn:aws:sqs:us-east-1:123456789012:removed
+        TopicConfigurations:
+          - Event: s3:ObjectRestore:Completed
+            Topic: arn:aws:sns:us-east-1:123456789012:restored
+        EventBridgeConfiguration: !If
+          - WithWebsite
+          - EventBridgeEnabled: true
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: team
+          Value: media
+  AssetsPermission:
+    Type: AWS::SNS::Topic
+  Site:
+    Type: AWS::S3::Bucket
+    Condition: WithWebsite
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+        RoutingRules:
+          - RoutingRuleCondition:
+              KeyPrefixEquals: docs/
+            RedirectRule:
+              ReplaceKeyPrefixWith: documents/
+              HttpRedirectCode: "301"
+  Redirect:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        RedirectAllRequestsTo:
+          HostName: example.com
+          Protocol: https
+      LoggingConfiguration: {}
+  SitePolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: WithWebsite
+    Properties:
+      Bucket: !Ref Site
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${Site.Arn}/*"
+  Orders:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: orders
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: created
+          AttributeType: N
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: by-status
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: created
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes: [total]
+          ProvisionedThroughput:
+            ReadCapacityUnits: 2
+            WriteCapacityUnits: 2
+      LocalSecondaryIndexes:
+        - IndexName: by-created
+          KeySchema:
+            - AttributeName: pk
+              KeyType: HASH
+            - AttributeName: created
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+        RecoveryPeriodInDays: 14
+      TableClass: STANDARD
+      DeletionProtectionEnabled: true
+      Tags:
+        - Key: team
+          Value: shop
+  Events:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - !If
+          - WithWebsite
+          - AttributeName: kind
+            AttributeType: S
+          - !Ref AWS::NoValue
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      StreamSpecification: !If
+        - WithWebsite
+        - StreamViewType: KEYS_ONLY
+        - !Ref AWS::NoValue
+      SSESpecification:
+        SSEEnabled: true
+        KMSMasterKeyId: alias/shop-events
+      OnDemandThroughput:
+        MaxReadRequestUnits: 100
+        MaxWriteRequestUnits: 50
+      GlobalSecondaryIndexes:
+        - IndexName: everything
+          KeySchema:
+            - AttributeName: id
+              KeyType: HASH
+          Projection: {}
+          OnDemandThroughput:
+            MaxReadRequestUnits: 10
+            MaxWriteRequestUnits: 10
+        - !If
+          - WithWebsite
+          - IndexName: by-kind
+            KeySchema:
+              - AttributeName: kind
+                KeyType: HASH
+            Projection:
+              ProjectionType: KEYS_ONLY
+          - !Ref AWS::NoValue
+  Images:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: shop/images
+      ImageTagMutability: IMMUTABLE
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":14},"action":{"type":"expire"}}]}'
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: pull
+            Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::123456789012:root
+            Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]
+      Tags:
+        - Key: team
+          Value: shop
+  Cache:
+    Type: AWS::ECR::Repository
+    Properties:
+      LifecyclePolicy: !If
+        - WithWebsite
+        - LifecyclePolicyText: '{"rules":[{"rulePriority":1,"selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+        - !Ref AWS::NoValue
+Outputs:
+  AssetsArn:
+    Value: !GetAtt Assets.Arn
+  AssetsDomain:
+    Value: !GetAtt Assets.RegionalDomainName
+  SiteUrl:
+    Condition: WithWebsite
+    Value: !GetAtt Site.WebsiteURL
+  OrdersStream:
+    Value: !GetAtt Orders.StreamArn
+  ImagesUri:
+    Value: !GetAtt Images.RepositoryUri
