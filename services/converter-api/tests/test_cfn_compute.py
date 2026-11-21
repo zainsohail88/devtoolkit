@@ -8,19 +8,28 @@ from pathlib import Path
 import pytest
 import yaml
 
-from converters.cfn import convert_template
 from converters.cfn.convert import Converter
 from converters.cfn.parse import load_template
-from converters.cfn.resources.compute import _inline_filename, ecs_json
+from converters.cfn.pipeline import convert_template
+from converters.cfn.resources.apigateway import method_path
+from converters.cfn.resources.compute import ContainerDefinitions, LambdaCode
 
 FIXTURE = Path(__file__).parent / "fixtures" / "cfn" / "compute.yaml"
 
 
-def convert(resources: dict, **extra) -> tuple[str, list[str]]:
-    template = {"Resources": resources, **extra}
+def convert(resources: dict, extra: dict | None = None) -> tuple[str, list[str]]:
+    template = {"Resources": resources}
+    template.update(extra or {})
     result = convert_template(yaml.safe_dump(template), stack_name="demo")
     main = next(f["content"] for f in result["files"] if f["path"] == "main.tf")
     return main, result["notes"]
+
+
+def with_properties(resource: dict, extra: dict) -> dict:
+    """A copy of `resource` with `extra` added to its properties."""
+    properties = dict(resource["Properties"])
+    properties.update(extra)
+    return dict(resource, Properties=properties)
 
 
 def with_hints(resources: dict, hints: dict) -> tuple[str, bool]:
@@ -68,7 +77,7 @@ FUNCTION = {"Type": "AWS::Lambda::Function", "Properties": {"Role": "arn:role", 
     ],
 )
 def test_inline_filename(handler, runtime, expected):
-    assert _inline_filename(handler, runtime) == expected
+    assert LambdaCode.inline_filename(handler, runtime) == expected
 
 
 @pytest.mark.parametrize(
@@ -80,7 +89,7 @@ def test_inline_filename(handler, runtime, expected):
 )
 def test_code_path_directory_is_zipped(path, expected):
     main, archive = with_hints(
-        {"Fn": {**FUNCTION, "Properties": {**FUNCTION["Properties"], "Code": {"S3Bucket": "x"}}}},
+        {"Fn": with_properties(FUNCTION, {"Code": {"S3Bucket": "x"}})},
         {"Fn": {"code_path": path}},
     )
     assert archive
@@ -128,9 +137,7 @@ def test_function_without_code_and_image_with_explicit_package_type():
 
 
 def test_unconverted_code_property_is_reported():
-    _, notes = convert(
-        {"Fn": {**FUNCTION, "Properties": {**FUNCTION["Properties"], "Code": {"Odd": 1}}}}
-    )
+    _, notes = convert({"Fn": with_properties(FUNCTION, {"Code": {"Odd": 1}})})
     assert any("'Fn.Code.Odd' was not converted" in n for n in notes)
 
 
@@ -290,7 +297,7 @@ def test_ecs_json_keeps_maps_intrinsics_and_types_values():
             "LogConfiguration": {"Options": {"AwsLogs-Group": "g"}},
         }
     ]
-    assert ecs_json(value) == [
+    assert ContainerDefinitions().convert(value) == [
         {
             "name": "app",
             "memory": 512,
@@ -390,24 +397,14 @@ def test_service_desired_count_defaults_to_one_like_cloudformation():
     main, _ = convert(
         {
             "Replica": SERVICE,
-            "Daemon": {
-                **SERVICE,
-                "Properties": {**SERVICE["Properties"], "SchedulingStrategy": "daemon"},
-            },
-            "Explicit": {**SERVICE, "Properties": {**SERVICE["Properties"], "DesiredCount": 0}},
-            "Chosen": {
-                **SERVICE,
-                "Properties": {
-                    **SERVICE["Properties"],
-                    "SchedulingStrategy": {"Fn::If": ["On", "DAEMON", "REPLICA"]},
-                },
-            },
-            "NoValue": {
-                **SERVICE,
-                "Properties": {**SERVICE["Properties"], "SchedulingStrategy": NO},
-            },
+            "Daemon": with_properties(SERVICE, {"SchedulingStrategy": "daemon"}),
+            "Explicit": with_properties(SERVICE, {"DesiredCount": 0}),
+            "Chosen": with_properties(
+                SERVICE, {"SchedulingStrategy": {"Fn::If": ["On", "DAEMON", "REPLICA"]}}
+            ),
+            "NoValue": with_properties(SERVICE, {"SchedulingStrategy": NO}),
         },
-        **CONDITION,
+        CONDITION,
     )
     blocks = {
         m.group(1): m.group(2)
@@ -426,10 +423,9 @@ def test_service_desired_count_defaults_to_one_like_cloudformation():
 def test_computed_assign_public_ip_is_parenthesised():
     main, _ = convert(
         {
-            "Svc": {
-                **SERVICE,
-                "Properties": {
-                    **SERVICE["Properties"],
+            "Svc": with_properties(
+                SERVICE,
+                {
                     "NetworkConfiguration": {
                         "AwsvpcConfiguration": {
                             "Subnets": ["s"],
@@ -437,9 +433,9 @@ def test_computed_assign_public_ip_is_parenthesised():
                         }
                     },
                 },
-            }
+            )
         },
-        **CONDITION,
+        CONDITION,
     )
     assert 'assign_public_ip = (local.on ? "ENABLED" : "DISABLED") == "ENABLED"' in main
 
@@ -460,7 +456,7 @@ def test_launch_template_no_device_is_never_empty():
                 },
             }
         },
-        **CONDITION,
+        CONDITION,
     )
     assert 'no_device   = "true"' in main
     assert 'no_device   = "yes"' in main
@@ -468,19 +464,15 @@ def test_launch_template_no_device_is_never_empty():
 
 
 def test_root_method_path_is_not_every_resource():
-    from converters.cfn.resources.apigateway import _method_path
-
-    assert _method_path("/", "GET") == "~1/GET"
+    assert method_path("/", "GET") == "~1/GET"
 
 
 def test_inline_code_using_cfn_response_is_noted():
     code = {"ZipFile": {"Fn::Sub": "import cfnresponse\n"}}
-    _, notes = convert({"Fn": {**FUNCTION, "Properties": {**FUNCTION["Properties"], "Code": code}}})
+    _, notes = convert({"Fn": with_properties(FUNCTION, {"Code": code})})
     assert any("cfn-response module" in n for n in notes)
     plain = {"ZipFile": "def handler(e, c): pass\n"}
-    _, notes = convert(
-        {"Fn": {**FUNCTION, "Properties": {**FUNCTION["Properties"], "Code": plain}}}
-    )
+    _, notes = convert({"Fn": with_properties(FUNCTION, {"Code": plain})})
     assert not any("cfn-response" in n for n in notes)
 
 
@@ -552,7 +544,7 @@ def test_container_definitions_types_strings_and_conditional_containers():
         {"Ref": "Containers"},
         {"Environment": "odd", "DockerLabels": "odd"},
     ]
-    assert ecs_json(value) == [
+    assert ContainerDefinitions().convert(value) == [
         {
             "name": "app",
             "environment": [
@@ -593,7 +585,7 @@ def test_conditional_container_is_filtered_out_of_the_list():
                 },
             }
         },
-        **CONDITION,
+        CONDITION,
     )
     assert "item if item != null" in main
     assert re.search(r"local\.on \? \{ [^}]*memory = 64[^}]* \} : null", main)
@@ -655,12 +647,14 @@ def test_conditional_alias_routing_and_concurrency():
                 },
             },
         },
-        Parameters={
-            "Env": {"Type": "String"},
-            "Weight": {"Type": "String"},
-            "Weights": {"Type": "String"},
+        {
+            "Parameters": {
+                "Env": {"Type": "String"},
+                "Weight": {"Type": "String"},
+                "Weights": {"Type": "String"},
+            },
+            "Conditions": CONDITION["Conditions"],
         },
-        Conditions=CONDITION["Conditions"],
     )
     assert 'dynamic "routing_config" {\n    for_each = local.on ? [1] : []' in main
     assert '"2" = 0.5' in main
@@ -688,7 +682,7 @@ def test_conditional_and_computed_block_device_mappings():
                 "Properties": {"ImageId": "ami-1", "BlockDeviceMappings": optional([])},
             },
         },
-        **CONDITION,
+        CONDITION,
     )
     assert 'dynamic "ebs_block_device" {\n    for_each = local.on ? [1] : []' in main
     assert 'device_name = "/dev/sdf"' in main
@@ -716,8 +710,10 @@ def test_computed_launch_template_tag_specifications_do_not_crash():
                 },
             },
         },
-        Parameters={"Env": {"Type": "String"}, "Tags": {"Type": "String"}},
-        Conditions=CONDITION["Conditions"],
+        {
+            "Parameters": {"Env": {"Type": "String"}, "Tags": {"Type": "String"}},
+            "Conditions": CONDITION["Conditions"],
+        },
     )
     assert main.count("# TagSpecifications") == 3
     assert "# TagSpecifications.Tags was not converted" in main
@@ -768,16 +764,15 @@ def test_template_text_cannot_inject_hcl():
                     }
                 },
             },
-            "Svc": {
-                **SERVICE,
-                "Properties": {
-                    **SERVICE["Properties"],
+            "Svc": with_properties(
+                SERVICE,
+                {
                     "SchedulingStrategy": EVIL,
                     "NetworkConfiguration": {
                         "AwsvpcConfiguration": {"Subnets": [EVIL], "AssignPublicIp": EVIL}
                     },
                 },
-            },
+            ),
             "Cl": {
                 "Type": "AWS::ECS::Cluster",
                 "Properties": {"ClusterName": EVIL, "ServiceConnectDefaults": {"Namespace": EVIL}},
@@ -792,3 +787,34 @@ def assert_no_injection(main: str) -> None:
     code = "\n".join(line for line in main.splitlines() if not line.lstrip().startswith("#"))
     assert 'file("' not in code
     assert not re.search(r"(?<!\$)\$\{file", code)
+
+
+def test_file_systems_launch_templates_credits_and_placement():
+    main, notes = convert(
+        {
+            "Fn": with_properties(
+                FUNCTION,
+                {"FileSystemConfigs": [{"Arn": "arn:ap", "LocalMountPath": "/mnt/data"}]},
+            ),
+            "Vm": {
+                "Type": "AWS::EC2::Instance",
+                "Properties": {
+                    "LaunchTemplate": {"LaunchTemplateName": "lt", "Version": "1"},
+                },
+            },
+            "Lt": {
+                "Type": "AWS::EC2::LaunchTemplate",
+                "Properties": {
+                    "LaunchTemplateData": {
+                        "CreditSpecification": {"CpuCredits": "unlimited"},
+                        "Placement": {"AvailabilityZone": "eu-west-1a", "Tenancy": "dedicated"},
+                    }
+                },
+            },
+        }
+    )
+    assert 'local_mount_path = "/mnt/data"' in main
+    assert 'launch_template {\n    name    = "lt"\n    version = "1"\n  }' in main
+    assert 'cpu_credits = "unlimited"' in main
+    assert 'availability_zone = "eu-west-1a"' in main and 'tenancy           = "dedicated"' in main
+    assert not [n for n in notes if "was not converted" in n]

@@ -16,8 +16,6 @@ _S3 = re.compile(r"(^|_)s_3(_|$)")
 _EC2 = re.compile(r"(^|_)ec_2(_|$)")
 _VERSION = re.compile(r"_v_(\d+)(_|$)")
 _IDENTIFIER_INVALID = re.compile(r"[^a-z0-9_]+")
-_CASE_CHANGE = re.compile(r"([a-z0-9])([A-Z])")
-_ACRONYM_END = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _REPEATED_UNDERSCORES = re.compile(r"_{2,}")
 
 # Names Terraform reserves inside a variable, resource or output block.
@@ -85,15 +83,29 @@ def snake(name: str) -> str:
     return _VERSION.sub(r"_v\1\2", result)
 
 
+def word_breaks(name: str) -> str:
+    """`_` where a new word starts, in one pass. Unlike snake(), digits stay with their
+    word: 'S3Endpoint' -> 'S3_Endpoint', 'PublicSubnet1' -> 'Public_Subnet1',
+    'DBInstance' -> 'DB_Instance'."""
+    out: list[str] = []
+    for index, char in enumerate(name):
+        if index and char.isupper():
+            previous = name[index - 1]
+            following = name[index + 1] if index + 1 < len(name) else ""
+            if previous.islower() or previous.isdigit():
+                out.append("_")
+            elif previous.isupper() and following.islower():
+                out.append("_")
+        out.append(char)
+    return "".join(out)
+
+
 def identifier(name: str, fallback: str = "this") -> str:
     """A valid Terraform block label from any CloudFormation name.
 
     'MyBucket' -> 'my_bucket', '1stQueue' -> 'r_1st_queue'. Never empty, never reserved.
     """
-    # Unlike snake(), digits stay with their word: 'S3Endpoint' -> 's3_endpoint',
-    # 'PublicSubnet1' -> 'public_subnet1'.
-    words = _CASE_CHANGE.sub(r"\1_\2", _ACRONYM_END.sub(r"\1_\2", str(name)))
-    words = _IDENTIFIER_INVALID.sub("_", words.lower())
+    words = _IDENTIFIER_INVALID.sub("_", word_breaks(str(name)).lower())
     words = _REPEATED_UNDERSCORES.sub("_", words).strip("_")
     if not words:
         words = fallback
@@ -107,11 +119,13 @@ class UniqueNames:
     """Hands out identifiers, adding _2, _3... when two names collide."""
 
     def __init__(self) -> None:
+        """No names taken yet."""
         self._used: set[str] = set()
         # Next suffix to try per wanted name, so many collisions stay linear.
         self._next: dict[str, int] = {}
 
     def take(self, wanted: str) -> str:
+        """`wanted`, or `wanted_2`, `wanted_3`... when it is taken already."""
         name = wanted
         counter = self._next.get(wanted, 2)
         while name in self._used:
@@ -122,4 +136,5 @@ class UniqueNames:
         return name
 
     def reserve(self, name: str) -> None:
+        """Mark `name` as taken without handing it out."""
         self._used.add(name)

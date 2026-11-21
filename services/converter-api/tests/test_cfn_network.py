@@ -6,13 +6,26 @@ from pathlib import Path
 
 import yaml
 
-from converters.cfn import convert_template
+from converters.cfn.pipeline import convert_template
+from converters.cfn.resources.network import _refers_to
 
 FIXTURE = Path(__file__).parent / "fixtures" / "cfn" / "network.yaml"
 
 
-def convert(resources: dict, **extra) -> tuple[str, list[str]]:
-    template = {"Resources": resources, **extra}
+def convert(
+    resources: dict,
+    parameters: dict | None = None,
+    conditions: dict | None = None,
+    outputs: dict | None = None,
+) -> tuple[str, list[str]]:
+    template: dict = {"Resources": resources}
+    for section, value in (
+        ("Parameters", parameters),
+        ("Conditions", conditions),
+        ("Outputs", outputs),
+    ):
+        if value is not None:
+            template[section] = value
     result = convert_template(
         yaml.safe_dump(template, sort_keys=False), layout="single", stack_name="demo"
     )
@@ -50,7 +63,7 @@ def test_vpc_subnet_and_ipv6_lists():
                 },
             },
         },
-        Outputs={
+        outputs={
             "VpcV6": {"Value": {"Fn::Select": [0, {"Fn::GetAtt": ["Vpc", "Ipv6CidrBlocks"]}]}},
             "SubnetV6": {
                 "Value": {"Fn::Select": [0, {"Fn::GetAtt": ["Subnet", "Ipv6CidrBlocks"]}]}
@@ -113,7 +126,7 @@ def test_inline_rules_ports_protocols_and_default_egress():
                 },
             }
         },
-        Parameters={"Proto": {"Type": "String"}},
+        parameters={"Proto": {"Type": "String"}},
     )
     assert 'from_port = -1 to_port = -1 protocol = "icmp"' in hcl
     assert 'from_port = 22 to_port = 22 protocol = "tcp"' in hcl
@@ -157,7 +170,7 @@ def test_inline_egress_and_conditional_rule():
                 },
             }
         },
-        Conditions={"Open": {"Fn::Equals": ["a", "a"]}},
+        conditions={"Open": {"Fn::Equals": ["a", "a"]}},
     )
     assert 'dynamic "ingress"' in hcl and "for_each = local.open ? [1] : []" in hcl
     assert 'security_groups = ["sg-2"]' in hcl
@@ -217,15 +230,18 @@ def test_group_with_standalone_rules_gets_rule_resources():
                 "Properties": {"GroupId": {"Fn::GetAtt": "Other.GroupId"}, "IpProtocol": "-1"},
             },
         },
-        Parameters={"Proto": {"Type": "String"}},
-        Conditions={"C": {"Fn::Equals": ["a", "b"]}},
+        parameters={"Proto": {"Type": "String"}},
+        conditions={"C": {"Fn::Equals": ["a", "b"]}},
     )
     assert 'resource "aws_vpc_security_group_ingress_rule" "sg_ingress_1"' in hcl
     assert 'resource "aws_vpc_security_group_egress_rule" "other_egress_1"' in hcl
     assert 'resource "aws_vpc_security_group_egress_rule" "sg_egress_1"' in hcl
     assert 'cidr_ipv6 = "::/0"' in hcl
     assert "ingress {" not in hcl
-    assert any("Other: the ingress rules are computed" in n for n in notes)
+    assert any(
+        "Other: the ingress rules are computed by a function, so they were not turned into" in n
+        for n in notes
+    )
     assert "ip_protocol = var.proto" in hcl
     assert 'prefix_list_id = "pl-1"' in hcl
     assert any("Out.GroupName" in n for n in notes)
@@ -262,7 +278,7 @@ def test_network_acl_entry_and_flow_log():
                 },
             },
         },
-        Parameters={"Proto": {"Type": "String"}},
+        parameters={"Proto": {"Type": "String"}},
     )
     assert "protocol = var.proto" in hcl and "icmp_type = -1" in hcl
     assert "egress = true" in hcl
@@ -304,8 +320,8 @@ def test_load_balancer_attributes_and_logs():
                 },
             },
         },
-        Parameters={"Scheme": {"Type": "String"}},
-        Conditions={"C": {"Fn::Equals": ["a", "b"]}},
+        parameters={"Scheme": {"Type": "String"}},
+        conditions={"C": {"Fn::Equals": ["a", "b"]}},
     )
     assert 'internal = var.scheme == "internal"' in hcl
     assert "internal = true" in hcl
@@ -343,7 +359,7 @@ def test_target_group_attributes_health_and_targets():
                 "Properties": {"Targets": {"Fn::If": ["C", [], []]}, "Matcher": {}},
             },
         },
-        Conditions={"C": {"Fn::Equals": ["a", "b"]}},
+        conditions={"C": {"Fn::Equals": ["a", "b"]}},
     )
     assert 'matcher = "0-99"' in hcl
     assert 'type = "app_cookie"' in hcl and 'cookie_name = "sid"' in hcl
@@ -424,7 +440,7 @@ def test_listener_actions_and_certificates():
                 },
             },
         },
-        Conditions={"C": {"Fn::Equals": ["a", "b"]}},
+        conditions={"C": {"Fn::Equals": ["a", "b"]}},
     )
     assert 'alpn_policy = "HTTP2Preferred"' in hcl
     assert 'certificate_arn = "arn:c1"' in hcl
@@ -534,8 +550,8 @@ def test_hosted_zone_and_records():
                 "Properties": {"HostedZoneName": {"Ref": "ZoneName"}, "Name": "c", "Type": "A"},
             },
         },
-        Parameters={"ZoneName": {"Type": "String"}},
-        Conditions={"C": {"Fn::Equals": ["a", "b"]}},
+        parameters={"ZoneName": {"Type": "String"}},
+        conditions={"C": {"Fn::Equals": ["a", "b"]}},
     )
     assert 'vpc { vpc_id = "vpc-1"' in hcl
     assert "team = " in hcl
@@ -622,8 +638,8 @@ def test_certificate_validation_variants():
                 },
             },
         },
-        Conditions={"C": {"Fn::Equals": ["a", "b"]}},
-        Outputs={"Arn": {"Value": {"Ref": "TwoZones"}, "Condition": "C"}},
+        conditions={"C": {"Fn::Equals": ["a", "b"]}},
+        outputs={"Arn": {"Value": {"Ref": "TwoZones"}, "Condition": "C"}},
     )
     assert 'certificate_transparency_logging_preference = "DISABLED"' in hcl
     assert 'validation_option { domain_name = "a.com"' in hcl
@@ -732,7 +748,7 @@ def test_distribution_full_config():
                 "Properties": {"DistributionConfig": {"Fn::If": ["C", {}, {}]}},
             },
         },
-        Conditions={"C": {"Fn::Equals": ["a", "b"]}},
+        conditions={"C": {"Fn::Equals": ["a", "b"]}},
     )
     assert 'resource "aws_cloudfront_origin_access_identity" "oai"' in hcl
     assert 'comment = "site"' in hcl
@@ -810,7 +826,7 @@ def test_value_helpers_pass_through_non_literals():
                 },
             },
         },
-        Parameters={"On": {"Type": "String"}, "Subnets": {"Type": "String"}},
+        parameters={"On": {"Type": "String"}, "Subnets": {"Type": "String"}},
     )
     assert "enabled = var.on" in hcl and 'interval = "often"' in hcl
     assert 'preserve_client_ip = "true"' in hcl
@@ -819,8 +835,6 @@ def test_value_helpers_pass_through_non_literals():
 
 
 def test_refers_to_reference_forms():
-    from converters.cfn.resources.network import _refers_to
-
     assert _refers_to({"Ref": "Sg"}, "Sg")
     assert _refers_to({"Fn::GetAtt": "Sg.GroupId"}, "Sg")
     assert _refers_to({"Fn::GetAtt": ["Sg", "GroupId"]}, "Sg")
@@ -831,21 +845,18 @@ def test_refers_to_reference_forms():
 # --- regressions --------------------------------------------------------------------------
 
 NO = {"Ref": "AWS::NoValue"}
-ENV = {
-    "Parameters": {"Env": {"Type": "String"}},
-    "Conditions": {"On": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}},
-}
+ENV_PARAMETERS = {"Env": {"Type": "String"}}
+ENV_CONDITIONS = {"On": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}}
 
 
 def _if(yes: object, no: object = NO) -> dict:
     return {"Fn::If": ["On", yes, no]}
 
 
-def _group(**props: object) -> dict:
-    return {
-        "Type": "AWS::EC2::SecurityGroup",
-        "Properties": {"GroupDescription": "d", "VpcId": "vpc-1", **props},
-    }
+def _group(props: dict) -> dict:
+    properties = {"GroupDescription": "d", "VpcId": "vpc-1"}
+    properties.update(props)
+    return {"Type": "AWS::EC2::SecurityGroup", "Properties": properties}
 
 
 SSH = {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "CidrIp": "10.0.0.0/8"}
@@ -856,7 +867,7 @@ ALLOW_ALL = 'from_port = 0 to_port = 0 protocol = "-1" cidr_blocks = ["0.0.0.0/0
 def test_standalone_rules_from_optional_items_are_counted():
     hcl, notes = convert(
         {
-            "Sg": _group(SecurityGroupIngress=[_if(SSH), NO, _if(SSH, HTTPS)]),
+            "Sg": _group({"SecurityGroupIngress": [_if(SSH), NO, _if(SSH, HTTPS)]}),
             "Self": {
                 "Type": "AWS::EC2::SecurityGroupIngress",
                 "Properties": {
@@ -866,7 +877,8 @@ def test_standalone_rules_from_optional_items_are_counted():
                 },
             },
         },
-        **ENV,
+        parameters=ENV_PARAMETERS,
+        conditions=ENV_CONDITIONS,
     )
     assert (
         'resource "aws_vpc_security_group_ingress_rule" "sg_ingress_1" { count = local.on ? 1 : 0'
@@ -881,12 +893,12 @@ def test_standalone_rules_from_optional_items_are_counted():
 def test_default_egress_kept_when_the_egress_rules_are_optional():
     hcl, notes = convert(
         {
-            "Inline": _group(SecurityGroupEgress=_if([HTTPS])),
-            "Single": _group(SecurityGroupEgress=_if(HTTPS)),
-            "Swapped": _group(SecurityGroupEgress=_if(NO, [HTTPS])),
-            "Computed": _group(SecurityGroupEgress=_if([HTTPS], [SSH])),
-            "Odd": _group(SecurityGroupEgress={"Fn::If": "odd"}),
-            "Standalone": _group(SecurityGroupEgress=_if([HTTPS])),
+            "Inline": _group({"SecurityGroupEgress": _if([HTTPS])}),
+            "Single": _group({"SecurityGroupEgress": _if(HTTPS)}),
+            "Swapped": _group({"SecurityGroupEgress": _if(NO, [HTTPS])}),
+            "Computed": _group({"SecurityGroupEgress": _if([HTTPS], [SSH])}),
+            "Odd": _group({"SecurityGroupEgress": {"Fn::If": "odd"}}),
+            "Standalone": _group({"SecurityGroupEgress": _if([HTTPS])}),
             "Rule": {
                 "Type": "AWS::EC2::SecurityGroupIngress",
                 "Properties": {
@@ -896,7 +908,8 @@ def test_default_egress_kept_when_the_egress_rules_are_optional():
                 },
             },
         },
-        **ENV,
+        parameters=ENV_PARAMETERS,
+        conditions=ENV_CONDITIONS,
     )
     inline = hcl.split('resource "aws_security_group" "inline"')[1].split('resource "')[0]
     assert 'dynamic "egress" { for_each = local.on ? [1] : [] content { from_port = 443' in inline
@@ -924,17 +937,15 @@ def test_default_egress_kept_when_the_egress_rules_are_optional():
     assert any("Odd.Egress' is computed by a function" in n for n in notes)
 
 
-def _target_group(attributes: list, **props: object) -> dict:
-    return {
-        "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
-        "Properties": {
-            "Port": 80,
-            "Protocol": "HTTP",
-            "VpcId": "vpc-1",
-            "TargetGroupAttributes": [{"Key": k, "Value": v} for k, v in attributes],
-            **props,
-        },
+def _target_group(attributes: list, props: dict | None = None) -> dict:
+    properties = {
+        "Port": 80,
+        "Protocol": "HTTP",
+        "VpcId": "vpc-1",
+        "TargetGroupAttributes": [{"Key": k, "Value": v} for k, v in attributes],
     }
+    properties.update(props or {})
+    return {"Type": "AWS::ElasticLoadBalancingV2::TargetGroup", "Properties": properties}
 
 
 def test_target_group_stickiness_defaults_and_cookie_durations():
@@ -964,13 +975,15 @@ def test_target_group_stickiness_defaults_and_cookie_durations():
 def test_partial_health_check_gets_the_aws_thresholds():
     hcl, _ = convert(
         {
-            "Web": _target_group([], HealthCheckPath="/health"),
-            "Tuned": _target_group([], HealthyThresholdCount=3, UnhealthyThresholdCount=4),
+            "Web": _target_group([], {"HealthCheckPath": "/health"}),
+            "Tuned": _target_group([], {"HealthyThresholdCount": 3, "UnhealthyThresholdCount": 4}),
             "Fn": {
                 "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
                 "Properties": {"TargetType": "lambda", "HealthCheckEnabled": True},
             },
-            "Geneve": _target_group([], Protocol="GENEVE", Port=6081, HealthCheckPort="80"),
+            "Geneve": _target_group(
+                [], {"Protocol": "GENEVE", "Port": 6081, "HealthCheckPort": "80"}
+            ),
             "Plain": _target_group([]),
         }
     )
@@ -1104,14 +1117,11 @@ def test_lists_from_functions_do_not_crash():
                 },
             },
         },
-        Parameters={
-            "Env": {"Type": "String"},
-            **{
-                name: {"Type": "String"}
-                for name in ("S3", "Codes", "Members", "Functions", "Query", "Hosts")
-            },
+        parameters={
+            name: {"Type": "String"}
+            for name in ("Env", "S3", "Codes", "Members", "Functions", "Query", "Hosts")
         },
-        Conditions=ENV["Conditions"],
+        conditions=ENV_CONDITIONS,
     )
     assert (
         'dynamic "custom_header" { for_each = local.on ? [1] : [] content { name = "X" '
@@ -1174,7 +1184,8 @@ def test_load_balancer_scheme_from_a_condition_is_compared_whole():
                 },
             }
         },
-        **ENV,
+        parameters=ENV_PARAMETERS,
+        conditions=ENV_CONDITIONS,
     )
     assert 'internal = (local.on ? "internal" : "internet-facing") == "internal"' in hcl
 
@@ -1288,7 +1299,8 @@ def test_template_text_cannot_inject_hcl():
                 },
             },
         },
-        **ENV,
+        "Parameters": ENV_PARAMETERS,
+        "Conditions": ENV_CONDITIONS,
     }
     result = convert_template(yaml.safe_dump(template, sort_keys=False), stack_name="demo")
     for file in result["files"]:

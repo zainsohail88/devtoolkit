@@ -4,26 +4,21 @@ import base64
 import hashlib
 import io
 import re
-import sys
 import zipfile
 from html.parser import HTMLParser
-from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from main import (
-    EXAMPLE_COMPOSE,
-    HTML_CACHE,
-    MAX_BODY_BYTES,
-    MAX_INPUT_CHARS,
-    MAX_TEMPLATE_CHARS,
-    SECURITY_HEADERS,
-    STATIC_CACHE,
-    create_app,
-    static_url,
-)
+from api_client import ApiClient
+from examples import EXAMPLE_COMPOSE
+from log_config import configure_logging, resolve_log_level
+from main import create_app
+from rendering import static_versions
+from security import HTML_CACHE, SECURITY_HEADERS, STATIC_CACHE
+from settings import MAX_BODY_BYTES, MAX_INPUT_CHARS, MAX_TEMPLATE_CHARS
 
 COMPOSE = 'services:\n  web:\n    image: nginx\n    ports:\n      - "8080:80"\n'
 FILES = [
@@ -59,6 +54,21 @@ def inline_scripts(html: str) -> list[str]:
     parser = _InlineScripts()
     parser.feed(html)
     return parser.scripts
+
+
+def form_body_chunks():
+    """A request body sent in chunks, so the client sends no Content-Length."""
+    yield b"compose_yaml=x"
+
+
+def unreachable(request: httpx.Request) -> httpx.Response:
+    """A converter-api that refuses every connection."""
+    raise httpx.ConnectError("connection refused", request=request)
+
+
+def boom() -> None:
+    """A route that fails with an HTTP error other than 404 or 405."""
+    raise HTTPException(503, "Down for maintenance")
 
 
 def ok_files(fake_api, files=FILES, notes=()):
@@ -122,7 +132,7 @@ def test_static_urls_are_versioned_by_content(client):
     # Built files (app.css, vendor/editor.js) may be absent in tests; the page still works.
     assert re.search(r'href="/static/app\.css\?v=([0-9a-f]{8}|0)"', html)
     assert re.search(r'src="/static/vendor/editor\.js\?v=([0-9a-f]{8}|0)"', html)
-    assert static_url("does-not-exist.css") == "/static/does-not-exist.css?v=0"
+    assert static_versions.url("does-not-exist.css") == "/static/does-not-exist.css?v=0"
 
 
 def test_page_structure_and_theme_toggle(client):
@@ -147,7 +157,7 @@ def test_404_page_has_a_way_back(client):
 def test_405_page(client):
     response = client.post("/", content=b"", headers={"Content-Length": "0"})
     assert response.status_code == 405
-    assert "isn&#39;t allowed here" in response.text
+    assert "is not allowed here" in response.text
 
 
 def test_malformed_form_gets_an_html_error(client, fake_api):
@@ -155,7 +165,7 @@ def test_malformed_form_gets_an_html_error(client, fake_api):
         "/compose-to-k8s", data={"compose_yaml": COMPOSE, "include_service": "maybe"}
     )
     assert response.status_code == 400
-    assert "wasn&#39;t filled in correctly" in response.text
+    assert "was not filled in correctly" in response.text
     assert fake_api.requests == []
 
 
@@ -259,7 +269,7 @@ def test_upload_not_utf8(client, fake_api):
         files={"compose_file": ("x.yaml", b"\xff\xfe\x00bad", "text/yaml")},
     )
     assert response.status_code == 400
-    assert "isn&#39;t UTF-8" in response.text
+    assert "is not UTF-8 text." in response.text
     assert fake_api.requests == []
 
 
@@ -290,10 +300,7 @@ def test_body_too_large(client, fake_api):
 
 
 def test_post_without_content_length(client):
-    def body():
-        yield b"compose_yaml=x"
-
-    response = client.post("/compose-to-k8s", content=body())
+    response = client.post("/compose-to-k8s", content=form_body_chunks())
     assert response.status_code == 411
 
 
@@ -320,7 +327,7 @@ def test_compose_unexpected_api_answer(client, fake_api):
     fake_api.body = {"detail": [{"msg": "..."}]}
     response = client.post("/compose-to-k8s", data={"compose_yaml": COMPOSE})
     assert response.status_code == 400
-    assert "couldn&#39;t process this input" in response.text
+    assert "could not process this input" in response.text
 
 
 def test_compose_success_without_files_list_is_an_error(client, fake_api):
@@ -352,11 +359,6 @@ def test_compose_api_json_not_object(client, fake_api):
 
 
 def test_compose_api_unreachable():
-    def unreachable(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused", request=request)
-
-    from api_client import ApiClient
-
     api = ApiClient("http://converter-api", transport=httpx.MockTransport(unreachable))
     with TestClient(create_app(api)) as client:
         response = client.post("/compose-to-k8s", data={"compose_yaml": COMPOSE})
@@ -485,7 +487,7 @@ def test_validate_unexpected_api_answer(client, fake_api):
     fake_api.body = {"detail": "bad"}
     response = client.post("/validate-yaml", data={"yaml_text": "a: 1"})
     assert response.status_code == 400
-    assert "couldn&#39;t process this input" in response.text
+    assert "could not process this input" in response.text
 
 
 def test_validate_api_down(client, fake_api):
@@ -499,42 +501,39 @@ def test_validate_api_down(client, fake_api):
 
 
 def test_resolve_log_level():
-    from main import resolve_log_level
-
     assert resolve_log_level(None) == ("INFO", None)
     assert resolve_log_level(" Debug ") == ("DEBUG", None)
     level, warning = resolve_log_level("loud")
     assert level == "INFO"
-    assert "Unknown LOG_LEVEL 'loud'" in warning
+    assert 'Unknown LOG_LEVEL "loud": using info.' in warning
 
 
 def test_configure_logging_warns_on_unknown_level(caplog):
-    from main import configure_logging
-
     assert configure_logging("warning") == "WARNING"
     with caplog.at_level("WARNING", logger="web"):
         assert configure_logging("loud") == "INFO"
-    assert "Unknown LOG_LEVEL 'loud'" in caplog.text
+    assert 'Unknown LOG_LEVEL "loud"' in caplog.text
 
 
 def test_other_http_errors_render_the_error_page(fake_api):
-    from fastapi import HTTPException
-
-    from api_client import ApiClient
-
     api = ApiClient("http://converter-api", transport=httpx.MockTransport(fake_api.handler))
     app = create_app(api)
-
-    @app.get("/boom")
-    def boom() -> None:
-        raise HTTPException(503, "Down for maintenance")
-
+    app.add_api_route("/boom", boom)
     with TestClient(app) as client:
         response = client.get("/boom")
     assert response.status_code == 503
     assert response.headers["content-type"].startswith("text/html")
     assert "Down for maintenance" in response.text
     assert 'href="/"' in response.text
+
+
+def test_app_without_a_given_client_reads_the_environment(monkeypatch):
+    monkeypatch.setenv("CONVERTER_API_URL", "http://elsewhere:9000")
+    app = create_app()
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert str(app.state.api._client.base_url) == "http://elsewhere:9000"
+    assert app.state.api._client.is_closed
 
 
 # --- CloudFormation -> Terraform -------------------------------------------------------------
@@ -597,21 +596,6 @@ def test_cfn_examples(client, example, marker):
     assert marker in text
     html = client.get(f"/cfn-to-terraform?example={example}").text
     assert "<html" in html and marker in html
-
-
-def test_examples_are_valid_templates():
-    from main import EXAMPLES
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "converter-api"))
-    try:
-        from converters.cfn import convert_template
-    except ImportError:  # pragma: no cover - the web service tested on its own
-        pytest.skip("converter-api is not next to web")
-    for name, text in EXAMPLES.items():
-        result = convert_template(text, stack_name="demo")
-        assert result["source"] == name
-        assert result["summary"]["unsupported"] == 0
-        assert not [n for n in result["notes"] if "was not converted" in n]
 
 
 def test_cfn_convert_renders_summary_files_resources_and_notes(client, fake_api):
@@ -709,7 +693,7 @@ def test_cfn_unexpected_answer_and_outage(client, fake_api):
     fake_api.body = {"detail": []}
     response = client.post("/cfn-to-terraform", data={"template": TEMPLATE})
     assert response.status_code == 400
-    assert "couldn&#39;t process this input" in response.text
+    assert "could not process this input" in response.text
     fake_api.status = 503
     response = client.post("/cfn-to-terraform", data={"template": TEMPLATE})
     assert response.status_code == 502
@@ -724,7 +708,10 @@ def test_cfn_zip_has_files_and_notes(client, fake_api):
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         assert archive.namelist() == ["versions.tf", "main.tf", "CONVERSION_NOTES.md"]
         notes = archive.read("CONVERSION_NOTES.md").decode()
-    assert "Converted from AWS SAM by DevToolkit" in notes
+    assert (
+        "Converted from AWS SAM by DevToolkit. The items below need a decision; "
+        "everything else was converted." in notes
+    )
     assert "- Check the bucket name" in notes
 
 

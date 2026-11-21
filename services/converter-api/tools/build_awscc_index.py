@@ -1,11 +1,11 @@
-"""Build converters/cfn/awscc_index.json from the awscc provider's schema.
+"""Build converters/cfn/awscc_index.json from the schema of the awscc provider.
 
 The index lists every CloudFormation type the awscc provider has, and per type:
-  "n": the awscc resource name, when it doesn't follow snake() (e.g. CloudFront words)
+  "n": the awscc resource name, when it differs from snake() (e.g. CloudFront words)
   "m": property paths that are maps (their keys stay as written)
   "j": property paths that are JSON documents (written with jsonencode)
-  "r": property paths whose attribute name doesn't follow snake()
-  "x": property paths CloudFormation has but this awscc version doesn't (left as notes)
+  "r": property paths whose attribute name differs from snake()
+  "x": property paths CloudFormation has and this awscc version lacks (left as notes)
   "a": every attribute a configuration can set, space-separated, so a property neither
        schema knows about is reported instead of written as an invalid argument
 Paths are CloudFormation property names joined by dots ("Environment.Variables").
@@ -22,7 +22,10 @@ Run it when bumping the awscc provider version:
     EOF
     terraform init && terraform providers schema -json > schema.json
     curl -sSfLO https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip
-    python tools/build_awscc_index.py /tmp/awscc/schema.json /tmp/awscc/CloudformationSchema.zip
+    cd <repository>/services/converter-api
+    python -m tools.build_awscc_index /tmp/awscc/schema.json /tmp/awscc/CloudformationSchema.zip
+
+Run it as a module from services/converter-api, so `converters` is importable.
 """
 
 from __future__ import annotations
@@ -33,9 +36,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from converters.cfn.naming import snake  # noqa: E402
+from converters.cfn.naming import snake
 
 OUTPUT = Path(__file__).resolve().parents[1] / "converters" / "cfn" / "awscc_index.json"
 _PROVIDER = "registry.terraform.io/hashicorp/awscc"
@@ -43,6 +44,7 @@ _MAX_DEPTH = 12
 
 
 def _resolve(spec: Any, definitions: dict[str, Any]) -> dict[str, Any]:
+    """`spec` with its `$ref` chain (into #/definitions) followed, or {} when it leads out."""
     for _ in range(20):
         if not (isinstance(spec, dict) and "$ref" in spec):
             break
@@ -54,6 +56,7 @@ def _resolve(spec: Any, definitions: dict[str, Any]) -> dict[str, Any]:
 
 
 def _is_object(spec: dict[str, Any]) -> bool:
+    """Whether a JSON schema describes an object."""
     kind = spec.get("type")
     return kind == "object" or (isinstance(kind, list) and "object" in kind)
 
@@ -66,11 +69,13 @@ def _walk(
     entry: dict[str, Any],
     depth: int = 0,
 ) -> None:
+    """Record into `entry` the maps, JSON documents, renamed and missing properties of
+    `props` (CloudFormation schema) against `attributes` (awscc schema), at `path`."""
     if depth > _MAX_DEPTH:
         return
     flat = {name.replace("_", ""): name for name in attributes}
     for prop, raw in props.items():
-        full = ".".join([*path, prop])
+        full = ".".join(path + [prop])
         name = snake(prop)
         if name not in attributes:
             alternative = flat.get(prop.lower())
@@ -108,13 +113,14 @@ def _walk(
                 inner["properties"],
                 definitions,
                 nested.get("attributes", {}),
-                [*path, prop],
+                path + [prop],
                 entry,
                 depth + 1,
             )
 
 
 def build(provider_schema: Path, cloudformation_zip: Path) -> dict[str, Any]:
+    """The index for every CloudFormation type in the zip that awscc has."""
     resources = json.loads(provider_schema.read_text())["provider_schemas"][_PROVIDER][
         "resource_schemas"
     ]
@@ -155,9 +161,16 @@ def build(provider_schema: Path, cloudformation_zip: Path) -> dict[str, Any]:
     return index
 
 
-if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        sys.exit(__doc__)
-    result = build(Path(sys.argv[1]), Path(sys.argv[2]))
+def main(arguments: list[str]) -> int:
+    """Build the index from the two files in `arguments` and write it to OUTPUT."""
+    if len(arguments) != 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    result = build(Path(arguments[0]), Path(arguments[1]))
     OUTPUT.write_text(json.dumps(result, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"{len(result)} resource types written to {OUTPUT}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

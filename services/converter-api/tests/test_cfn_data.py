@@ -5,11 +5,24 @@ from __future__ import annotations
 import json
 import re
 
-from converters.cfn import convert_template
+from converters.cfn.pipeline import convert_template
 
 
-def convert(resources: dict, **sections: object) -> tuple[str, list[str]]:
-    result = convert_template(json.dumps({"Resources": resources, **sections}), stack_name="demo")
+def convert(
+    resources: dict,
+    parameters: dict | None = None,
+    conditions: dict | None = None,
+    outputs: dict | None = None,
+) -> tuple[str, list[str]]:
+    template: dict = {"Resources": resources}
+    for section, value in (
+        ("Parameters", parameters),
+        ("Conditions", conditions),
+        ("Outputs", outputs),
+    ):
+        if value is not None:
+            template[section] = value
+    result = convert_template(json.dumps(template), stack_name="demo")
     files = {f["path"]: f["content"] for f in result["files"]}
     return files["main.tf"] + files.get("outputs.tf", ""), result["notes"]
 
@@ -19,10 +32,10 @@ def squash(text: str) -> str:
     return re.sub(r" +=", " =", text)
 
 
-def _db(policy: str | None = None, **props: object) -> dict:
+def _db(policy: str | None = None, props: dict | None = None) -> dict:
     resource: dict = {
         "Type": "AWS::RDS::DBInstance",
-        "Properties": {"Engine": "postgres", "DBInstanceClass": "db.t4g.micro", **props},
+        "Properties": {"Engine": "postgres", "DBInstanceClass": "db.t4g.micro"} | (props or {}),
     }
     if policy:
         resource["DeletionPolicy"] = policy
@@ -33,11 +46,11 @@ def test_db_instance_final_snapshot_follows_the_deletion_policy():
     main, notes = convert(
         {
             "Default": _db(),
-            "Named": _db("Retain", DBInstanceIdentifier="named-db"),
+            "Named": _db("Retain", {"DBInstanceIdentifier": "named-db"}),
             "Gone": _db("Delete"),
             "Snap": _db("Snapshot"),
         },
-        Outputs={
+        outputs={
             "Id": {"Value": {"Ref": "Default"}},
             "Arn": {"Value": {"Fn::GetAtt": ["Default", "DBInstanceArn"]}},
             "Zone": {"Value": {"Fn::GetAtt": ["Default", "Endpoint.HostedZoneId"]}},
@@ -56,13 +69,15 @@ def test_db_instance_final_snapshot_follows_the_deletion_policy():
 
 
 def test_db_instance_password_note():
-    main, notes = convert({"Db": _db("Delete", MasterUserPassword="secret", MasterUsername="u")})
+    main, notes = convert(
+        {"Db": _db("Delete", {"MasterUserPassword": "secret", "MasterUsername": "u"})}
+    )
     assert 'password            = "secret"' in main
     assert any("Db: the master password ends up in the Terraform state" in n for n in notes)
 
 
 def test_db_instance_master_secret_without_key():
-    main, _ = convert({"Db": _db("Delete", MasterUserSecret={})})
+    main, _ = convert({"Db": _db("Delete", {"MasterUserSecret": {}})})
     assert "master_user_secret_kms_key_id" not in main
 
 
@@ -86,8 +101,8 @@ def test_parameter_group_values():
                 },
             },
         },
-        Parameters={"Value": {"Type": "String"}},
-        Conditions={"On": {"Fn::Equals": [1, 1]}},
+        parameters={"Value": {"Type": "String"}},
+        conditions={"On": {"Fn::Equals": [1, 1]}},
     )
     assert 'value = "1"' in main
     assert "value = var.value" in main
@@ -109,7 +124,7 @@ def test_cluster_attributes_and_password():
                 },
             }
         },
-        Outputs={
+        outputs={
             "Id": {"Value": {"Ref": "Cluster"}},
             "Read": {"Value": {"Fn::GetAtt": ["Cluster", "ReadEndpoint.Address"]}},
             "Secret": {"Value": {"Fn::GetAtt": ["Cluster", "MasterUserSecret.SecretArn"]}},
@@ -136,7 +151,7 @@ def test_kms_references():
                 },
             },
         },
-        Outputs={"Alias": {"Value": {"Ref": "Alias"}}, "Key": {"Value": {"Ref": "Key"}}},
+        outputs={"Alias": {"Value": {"Ref": "Alias"}}, "Key": {"Value": {"Ref": "Key"}}},
     )
     assert "target_key_id = aws_kms_key.key.key_id" in main
     assert "aws_kms_alias.alias.name" in main
@@ -150,10 +165,10 @@ def test_secret_with_generated_value_is_reported():
                 "Properties": {"GenerateSecretString": {"PasswordLength": 32}},
             }
         },
-        Outputs={"Arn": {"Value": {"Ref": "Secret"}}},
+        outputs={"Arn": {"Value": {"Ref": "Secret"}}},
     )
     assert "GenerateSecretString was not converted" in main
-    assert any("ephemeral random_password" in n for n in notes)
+    assert any("random_password and secret_string_wo or convert this secret" in n for n in notes)
     assert "aws_secretsmanager_secret_version" not in main
     assert "aws_secretsmanager_secret.secret.arn" in main
 
@@ -166,7 +181,7 @@ def test_ssm_parameter_references():
                 "Properties": {"Name": "/p", "Type": "String", "Value": "v"},
             }
         },
-        Outputs={
+        outputs={
             "Name": {"Value": {"Ref": "P"}},
             "Value": {"Value": {"Fn::GetAtt": ["P", "Value"]}, "Description": "v"},
         },
@@ -178,7 +193,7 @@ def test_ssm_parameter_references():
 def test_rds_names_are_lowercased_as_cloudformation_stores_them():
     main, _ = convert(
         {
-            "Db": _db(DBInstanceIdentifier="MyDatabase"),
+            "Db": _db(props={"DBInstanceIdentifier": "MyDatabase"}),
             "Cluster": {
                 "Type": "AWS::RDS::DBCluster",
                 "Properties": {
@@ -202,9 +217,9 @@ def test_rds_names_are_lowercased_as_cloudformation_stores_them():
                     "Description": "d",
                 },
             },
-            "Ref": _db("Delete", DBInstanceIdentifier={"Ref": "Params"}),
+            "Ref": _db("Delete", {"DBInstanceIdentifier": {"Ref": "Params"}}),
         },
-        Parameters={"GroupName": {"Type": "String"}},
+        parameters={"GroupName": {"Type": "String"}},
     )
     main = squash(main)
     assert 'identifier = "mydatabase"' in main
@@ -218,7 +233,7 @@ def test_rds_names_are_lowercased_as_cloudformation_stores_them():
 
 def test_db_instance_applies_changes_immediately_like_cloudformation():
     main, notes = convert(
-        {"Now": _db("Delete"), "Later": _db("Delete", ApplyImmediately=False)},
+        {"Now": _db("Delete"), "Later": _db("Delete", {"ApplyImmediately": False})},
     )
     main = squash(main)
     assert main.count("apply_immediately = true") == 1
@@ -235,18 +250,20 @@ def test_cluster_member_instance_is_a_cluster_instance():
                 "Properties": {"Engine": "aurora-postgresql"},
             },
             "Member": _db(
-                DBClusterIdentifier={"Ref": "Cluster"},
-                Engine="aurora-postgresql",
-                DBInstanceIdentifier="Member-1",
-                DBInstanceClass="db.serverless",
-                DBParameterGroupName="params",
-                PromotionTier=1,
-                PubliclyAccessible=False,
-                MonitoringInterval="60",
-                Tags=[{"Key": "a", "Value": "b"}],
+                props={
+                    "DBClusterIdentifier": {"Ref": "Cluster"},
+                    "Engine": "aurora-postgresql",
+                    "DBInstanceIdentifier": "Member-1",
+                    "DBInstanceClass": "db.serverless",
+                    "DBParameterGroupName": "params",
+                    "PromotionTier": 1,
+                    "PubliclyAccessible": False,
+                    "MonitoringInterval": "60",
+                    "Tags": [{"Key": "a", "Value": "b"}],
+                }
             ),
         },
-        Outputs={
+        outputs={
             "Address": {"Value": {"Fn::GetAtt": ["Member", "Endpoint.Address"]}},
             "Port": {"Value": {"Fn::GetAtt": ["Member", "Endpoint.Port"]}},
             "Res": {"Value": {"Fn::GetAtt": ["Member", "DbiResourceId"]}},

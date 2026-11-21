@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from converters.cfn import convert_template
-from converters.cfn.resources.apigateway import _method_path, _suffix
+from converters.cfn.pipeline import convert_template
+from converters.cfn.resources.apigateway import method_path, name_suffix
 
 FIXTURE = Path(__file__).parent / "fixtures" / "cfn" / "apigateway.yaml"
 
@@ -47,14 +47,14 @@ def test_fixture_converts_everything():
     ],
 )
 def test_method_path(path, method, expected):
-    assert _method_path(path, method) == expected
+    assert method_path(path, method) == expected
 
 
 @pytest.mark.parametrize(
     ("value", "expected"), [("200", "_200"), (404, "_404"), ("!!", "_3"), (True, "_3")]
 )
 def test_suffix(value, expected):
-    assert _suffix(value, 3) == expected
+    assert name_suffix(value, 3) == expected
 
 
 def test_rest_api_defaults_and_body_location():
@@ -403,3 +403,21 @@ def test_api_gateway_template_text_cannot_inject_hcl():
         }
     )
     assert_no_injection(main)
+
+
+def test_http_integration_tls_config():
+    main, notes = convert(
+        {
+            "Http": {"Type": "AWS::ApiGatewayV2::Api", "Properties": {"Name": "h"}},
+            "Private": {
+                "Type": "AWS::ApiGatewayV2::Integration",
+                "Properties": {
+                    "ApiId": {"Ref": "Http"},
+                    "IntegrationType": "HTTP_PROXY",
+                    "TlsConfig": {"ServerNameToVerify": "example.com"},
+                },
+            },
+        }
+    )
+    assert 'tls_config {\n    server_name_to_verify = "example.com"\n  }' in main
+    assert not [n for n in notes if "was not converted" in n]

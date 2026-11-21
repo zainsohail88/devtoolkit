@@ -17,8 +17,9 @@ $(VENV):
 install: $(VENV) ## Install dev dependencies for every service into .venv
 	$(BIN)/pip install $(foreach s,$(SERVICES),-r services/$(s)/requirements-dev.txt)
 
-lint: ## Run ruff lint and format checks on every service
+lint: ## Run ruff and the house code rules (scripts/check_code_rules.py) on every service and the docs
 	@for s in $(SERVICES); do echo "== $$s"; (cd services/$$s && ../../$(BIN)/ruff check . && ../../$(BIN)/ruff format --check .) || exit 1; done
+	@echo "== code rules"; $(BIN)/python scripts/check_code_rules.py
 
 format: ## Auto-format every service with ruff
 	@for s in $(SERVICES); do (cd services/$$s && ../../$(BIN)/ruff check --fix . && ../../$(BIN)/ruff format .) || exit 1; done
@@ -56,7 +57,7 @@ validate-k8s: ## Validate K8s manifests with kubeconform
 	kubeconform -strict -summary k8s/
 
 validate-terraform: ## Convert the CloudFormation fixtures and run terraform validate on them (needs terraform)
-	cd services/converter-api && ../../$(BIN)/python tools/validate_terraform.py
+	PYTHON=$(BIN)/python scripts/validate-terraform.sh
 
 cluster-up: ## Create the local kind cluster (no-op if it exists)
 	@kind version | grep -q '$(KIND_VERSION) ' \

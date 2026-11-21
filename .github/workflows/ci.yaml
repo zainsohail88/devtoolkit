@@ -43,6 +43,11 @@ jobs:
             echo "== $service"
             (cd "services/$service" && ruff check . && ruff format --check .)
           done
+      # The rules ruff has no setting for: no nested functions or lambdas, no * or **,
+      # imports at the top only, no silenced checks, docstrings and return types, and the
+      # writing rules for the docs. See scripts/check_code_rules.py.
+      - name: House code rules
+        run: python scripts/check_code_rules.py
 
   test:
     runs-on: ubuntu-latest
@@ -146,7 +151,7 @@ jobs:
           TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/terraform-plugins
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
-          cd services/converter-api && python tools/validate_terraform.py
+          PYTHON=python scripts/validate-terraform.sh
 
   # Deploys k8s/ to a real kind cluster (same config as `make cluster-up`) and uses the UI.
   # Catches what static checks can't: probes, securityContext vs the image, Pod Security,

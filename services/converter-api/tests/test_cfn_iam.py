@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from converters.cfn import convert_template
+from converters.cfn.pipeline import convert_template
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cfn"
 TRUST = {
@@ -27,8 +27,21 @@ DOC = {
 }
 
 
-def convert(resources: dict, **sections: object) -> tuple[str, list[str], dict]:
-    result = convert_template(json.dumps({"Resources": resources, **sections}), stack_name="demo")
+def convert(
+    resources: dict,
+    parameters: dict | None = None,
+    conditions: dict | None = None,
+    outputs: dict | None = None,
+) -> tuple[str, list[str], dict]:
+    template: dict = {"Resources": resources}
+    for section, value in (
+        ("Parameters", parameters),
+        ("Conditions", conditions),
+        ("Outputs", outputs),
+    ):
+        if value is not None:
+            template[section] = value
+    result = convert_template(json.dumps(template), stack_name="demo")
     files = {f["path"]: f["content"] for f in result["files"]}
     return files["main.tf"], result["notes"], files
 
@@ -65,7 +78,7 @@ def test_role_with_inline_and_managed_policies():
                 },
             }
         },
-        Outputs={"Id": {"Value": {"Fn::GetAtt": ["Role", "RoleId"]}}},
+        outputs={"Id": {"Value": {"Fn::GetAtt": ["Role", "RoleId"]}}},
     )
     assert 'resource "aws_iam_role" "role"' in main
     assert "max_session_duration = 3600" in main
@@ -98,7 +111,7 @@ def test_role_policies_computed_by_functions_are_reported():
                 },
             }
         },
-        Conditions={"On": {"Fn::Equals": ["a", "a"]}},
+        conditions={"On": {"Fn::Equals": ["a", "a"]}},
     )
     assert "Policies[0] was not converted" in main
     assert "ManagedPolicyArns was not converted" in main
@@ -156,7 +169,7 @@ def test_policy_type_follows_the_first_principal():
                 "Properties": {"PolicyDocument": DOC, "Users": ["bob"]},
             }
         },
-        Outputs={"P": {"Value": {"Ref": "Policy"}}},
+        outputs={"P": {"Value": {"Ref": "Policy"}}},
     )
     assert 'resource "aws_iam_user_policy" "policy"' in main
     assert "name =" not in main
@@ -195,7 +208,7 @@ def test_managed_policy_and_attachments():
                 },
             }
         },
-        Outputs={
+        outputs={
             "Arn": {"Value": {"Ref": "Managed"}},
             "Id": {"Value": {"Fn::GetAtt": ["Managed", "PolicyId"]}},
         },
@@ -214,7 +227,7 @@ def test_instance_profile_takes_its_one_role():
             "Profile": {"Type": "AWS::IAM::InstanceProfile", "Properties": {"Roles": ["r"]}},
             "Two": {"Type": "AWS::IAM::InstanceProfile", "Properties": {"Roles": ["a", "b"]}},
         },
-        Outputs={"Arn": {"Value": {"Fn::GetAtt": ["Profile", "Arn"]}}},
+        outputs={"Arn": {"Value": {"Fn::GetAtt": ["Profile", "Arn"]}}},
     )
     assert 'role = "r"' in main
     assert any("Two.Roles' was not converted" in n for n in notes)
@@ -290,8 +303,8 @@ def test_optional_managed_policies_and_inline_policies_are_counted():
                 },
             }
         },
-        Parameters=ENV,
-        Conditions=ON,
+        parameters=ENV,
+        conditions=ON,
     )
     main = squash(main)
     admin = main.split('"aws_iam_role_policy_attachment" "role_administrator_access"')[1]
@@ -331,9 +344,9 @@ def test_policy_with_optional_principals():
                 "Properties": {"PolicyDocument": DOC, "Groups": [_if("admins")]},
             },
         },
-        Parameters=ENV,
-        Conditions=ON,
-        Outputs={"Ref": {"Value": {"Ref": "OnlyOptional"}}},
+        parameters=ENV,
+        conditions=ON,
+        outputs={"Ref": {"Value": {"Ref": "OnlyOptional"}}},
     )
     main = squash(main)
     # The principal that is always there gets the main resource.

@@ -7,23 +7,34 @@ from pathlib import Path
 import pytest
 import yaml
 
-from converters.cfn import CfnError, convert_template
-from converters.cfn.context import Expression
-from converters.cfn.sam import POLICY_TEMPLATES, expand_sam
+from converters.cfn.errors import CfnError
+from converters.cfn.models import Expression
+from converters.cfn.pipeline import convert_template
+from converters.cfn.sam import expand_sam
+from converters.cfn.sam_policies import PolicyTemplates
 
 FIXTURE = Path(__file__).parent / "fixtures" / "cfn" / "sam.yaml"
 TRANSFORM = "AWS::Serverless-2016-10-31"
 
 
-def expand(resources: dict, **extra) -> tuple[dict, dict, list[str]]:
+def expand(resources: dict, extra: dict | None = None) -> tuple[dict, dict, list[str]]:
     notes: list[str] = []
-    template = {"Transform": TRANSFORM, "Resources": resources, **extra}
+    template = {"Transform": TRANSFORM, "Resources": resources}
+    template.update(extra or {})
     out, hints = expand_sam(template, notes)
     return out, hints, notes
 
 
-def function(**props) -> dict:
-    return {"Type": "AWS::Serverless::Function", "Properties": {"Handler": "a.b", **props}}
+def function(props: dict | None = None) -> dict:
+    properties = {"Handler": "a.b"}
+    properties.update(props or {})
+    return {"Type": "AWS::Serverless::Function", "Properties": properties}
+
+
+def with_attributes(resource: dict, attributes: dict) -> dict:
+    out = dict(resource)
+    out.update(attributes)
+    return out
 
 
 def test_fixture_converts_to_aws_resources_only():
@@ -37,20 +48,24 @@ def test_function_role_and_globals():
     out, hints, notes = expand(
         {
             "Fn": function(
-                CodeUri="./src/",
-                Environment={"Variables": {"B": "2"}},
-                Layers=["own"],
-                Tags={"team": "a"},
-                Tracing="Active",
-                Unknown=1,
+                {
+                    "CodeUri": "./src/",
+                    "Environment": {"Variables": {"B": "2"}},
+                    "Layers": ["own"],
+                    "Tags": {"team": "a"},
+                    "Tracing": "Active",
+                    "Unknown": 1,
+                },
             )
         },
-        Globals={
-            "Function": {
-                "Runtime": "python3.13",
-                "Environment": {"Variables": {"A": "1"}},
-                "Layers": ["global"],
-                "Tags": {"Ref": "AWS::NoValue"},
+        {
+            "Globals": {
+                "Function": {
+                    "Runtime": "python3.13",
+                    "Environment": {"Variables": {"A": "1"}},
+                    "Layers": ["global"],
+                    "Tags": {"Ref": "AWS::NoValue"},
+                }
             }
         },
     )
@@ -86,25 +101,27 @@ def test_function_role_and_globals():
     ],
 )
 def test_code_locations(props, code, hint):
-    out, hints, _ = expand({"Fn": function(**props)})
+    out, hints, _ = expand({"Fn": function(props)})
     assert out["Resources"]["Fn"]["Properties"].get("Code") == code
     assert hints.get("Fn", {}).get("code_path") == hint
 
 
 def test_computed_code_uri_is_noted():
-    _, _, notes = expand({"Fn": function(CodeUri={"Ref": "Path"})})
+    _, _, notes = expand({"Fn": function({"CodeUri": {"Ref": "Path"}})})
     assert any("CodeUri is computed" in n for n in notes)
 
 
 def test_dead_letter_queue_and_role_options():
     out, _, _ = expand(
         {
-            "Sqs": function(DeadLetterQueue={"Type": "SQS", "TargetArn": "arn:q"}),
+            "Sqs": function({"DeadLetterQueue": {"Type": "SQS", "TargetArn": "arn:q"}}),
             "Sns": function(
-                DeadLetterQueue={"Type": "SNS", "TargetArn": "arn:t"},
-                PermissionsBoundary="arn:boundary",
-                RolePath="/apps/",
-                AssumeRolePolicyDocument={"Statement": []},
+                {
+                    "DeadLetterQueue": {"Type": "SNS", "TargetArn": "arn:t"},
+                    "PermissionsBoundary": "arn:boundary",
+                    "RolePath": "/apps/",
+                    "AssumeRolePolicyDocument": {"Statement": []},
+                },
             ),
         }
     )
@@ -120,7 +137,9 @@ def test_dead_letter_queue_and_role_options():
 
 
 def test_explicit_role_skips_the_generated_role():
-    out, _, notes = expand({"Fn": function(Role="arn:role", Policies=["AmazonS3ReadOnlyAccess"])})
+    out, _, notes = expand(
+        {"Fn": function({"Role": "arn:role", "Policies": ["AmazonS3ReadOnlyAccess"]})}
+    )
     assert "FnRole" not in out["Resources"]
     assert out["Resources"]["Fn"]["Properties"]["Role"] == "arn:role"
     assert any("sets both Role and Policies" in n for n in notes)
@@ -130,16 +149,18 @@ def test_policies():
     out, _, notes = expand(
         {
             "Fn": function(
-                Policies=[
-                    "AmazonS3ReadOnlyAccess",
-                    "arn:aws:iam::aws:policy/Custom",
-                    {"Ref": "PolicyArn"},
-                    {"Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}},
-                    {"DynamoDBCrudPolicy": {"TableName": "t"}},
-                    {"NoSuchTemplate": {}},
-                    {"CloudWatchPutMetricPolicy": None},
-                    42,
-                ]
+                {
+                    "Policies": [
+                        "AmazonS3ReadOnlyAccess",
+                        "arn:aws:iam::aws:policy/Custom",
+                        {"Ref": "PolicyArn"},
+                        {"Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}},
+                        {"DynamoDBCrudPolicy": {"TableName": "t"}},
+                        {"NoSuchTemplate": {}},
+                        {"CloudWatchPutMetricPolicy": None},
+                        42,
+                    ]
+                }
             )
         }
     )
@@ -157,7 +178,7 @@ def test_policies():
     assert any("a Policies entry was not converted" in n for n in notes)
 
 
-@pytest.mark.parametrize("name", sorted(POLICY_TEMPLATES))
+@pytest.mark.parametrize("name", PolicyTemplates().names())
 def test_every_policy_template_converts(name):
     params = {
         "TableName": {"Ref": "T"},
@@ -175,7 +196,7 @@ def test_every_policy_template_converts(name):
     }
     resources = {
         "T": {"Type": "AWS::DynamoDB::Table", "Properties": {"TableName": "t"}},
-        "Fn": function(InlineCode="x", Runtime="python3.13", Policies=[{name: params}]),
+        "Fn": function({"InlineCode": "x", "Runtime": "python3.13", "Policies": [{name: params}]}),
     }
     result = convert_template(
         yaml.safe_dump({"Transform": TRANSFORM, "Resources": resources}), stack_name="demo"
@@ -188,40 +209,42 @@ def test_polling_and_rule_events():
     out, _, _ = expand(
         {
             "Fn": function(
-                Events={
-                    "Queue": {"Type": "SQS", "Properties": {"Queue": "arn:q", "BatchSize": 5}},
-                    "Stream": {
-                        "Type": "Kinesis",
-                        "Properties": {"Stream": "arn:k", "StartingPosition": "LATEST"},
-                    },
-                    "Every": {
-                        "Type": "Schedule",
-                        "Properties": {
-                            "Schedule": "rate(1 hour)",
-                            "Enabled": False,
-                            "Name": "n",
-                            "Input": "{}",
+                {
+                    "Events": {
+                        "Queue": {"Type": "SQS", "Properties": {"Queue": "arn:q", "BatchSize": 5}},
+                        "Stream": {
+                            "Type": "Kinesis",
+                            "Properties": {"Stream": "arn:k", "StartingPosition": "LATEST"},
                         },
-                    },
-                    "Bus": {
-                        "Type": "EventBridgeRule",
-                        "Properties": {
-                            "Pattern": {"source": ["x"]},
-                            "EventBusName": "b",
-                            "State": "ENABLED",
-                            "RuleName": "r",
-                            "Description": "d",
-                            "InputPath": "$.x",
+                        "Every": {
+                            "Type": "Schedule",
+                            "Properties": {
+                                "Schedule": "rate(1 hour)",
+                                "Enabled": False,
+                                "Name": "n",
+                                "Input": "{}",
+                            },
                         },
-                    },
-                    "Later": {
-                        "Type": "ScheduleV2",
-                        "Properties": {
-                            "ScheduleExpression": "rate(1 day)",
-                            "Name": "s",
-                            "Input": "{}",
+                        "Bus": {
+                            "Type": "EventBridgeRule",
+                            "Properties": {
+                                "Pattern": {"source": ["x"]},
+                                "EventBusName": "b",
+                                "State": "ENABLED",
+                                "RuleName": "r",
+                                "Description": "d",
+                                "InputPath": "$.x",
+                            },
                         },
-                    },
+                        "Later": {
+                            "Type": "ScheduleV2",
+                            "Properties": {
+                                "ScheduleExpression": "rate(1 day)",
+                                "Name": "s",
+                                "Input": "{}",
+                            },
+                        },
+                    }
                 }
             )
         }
@@ -262,28 +285,30 @@ def test_sns_s3_and_logs_events():
             "Bucket": {"Type": "AWS::S3::Bucket", "DependsOn": "Other"},
             "Other": {"Type": "AWS::SNS::Topic"},
             "Fn": function(
-                Events={
-                    "Topic": {
-                        "Type": "SNS",
-                        "Properties": {
-                            "Topic": "arn:t",
-                            "FilterPolicy": {"a": ["b"]},
-                            "SqsSubscription": True,
+                {
+                    "Events": {
+                        "Topic": {
+                            "Type": "SNS",
+                            "Properties": {
+                                "Topic": "arn:t",
+                                "FilterPolicy": {"a": ["b"]},
+                                "SqsSubscription": True,
+                            },
                         },
-                    },
-                    "Upload": {
-                        "Type": "S3",
-                        "Properties": {
-                            "Bucket": {"Ref": "Bucket"},
-                            "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
-                            "Filter": {"S3Key": {}},
+                        "Upload": {
+                            "Type": "S3",
+                            "Properties": {
+                                "Bucket": {"Ref": "Bucket"},
+                                "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+                                "Filter": {"S3Key": {}},
+                            },
                         },
-                    },
-                    "Elsewhere": {
-                        "Type": "S3",
-                        "Properties": {"Bucket": "external", "Events": "s3:ObjectCreated:*"},
-                    },
-                    "Logs": {"Type": "CloudWatchLogs", "Properties": {"LogGroupName": "/x"}},
+                        "Elsewhere": {
+                            "Type": "S3",
+                            "Properties": {"Bucket": "external", "Events": "s3:ObjectCreated:*"},
+                        },
+                        "Logs": {"Type": "CloudWatchLogs", "Properties": {"LogGroupName": "/x"}},
+                    }
                 }
             ),
         }
@@ -299,39 +324,46 @@ def test_sns_s3_and_logs_events():
     }
     assert resources["FnLogs"]["DependsOn"] == ["FnLogsPermission"]
     assert any("SqsSubscription" in n for n in notes)
-    assert any("FnElsewhere: the S3 event's bucket is not in this template" in n for n in notes)
+    assert any(
+        "FnElsewhere: the bucket of the S3 event is outside this template" in n for n in notes
+    )
 
 
 def test_api_events_build_the_rest_api_body():
     out, _, notes = expand(
         {
             "Fn": function(
-                Events={
-                    "Get": {"Type": "Api", "Properties": {"Path": "/items/{id}", "Method": "GET"}},
-                    "Any": {
-                        "Type": "Api",
-                        "Properties": {
-                            "Path": "/all",
-                            "Method": "any",
-                            "Auth": {"Authorizer": "X"},
+                {
+                    "Events": {
+                        "Get": {
+                            "Type": "Api",
+                            "Properties": {"Path": "/items/{id}", "Method": "GET"},
                         },
-                    },
-                    "Mine": {
-                        "Type": "Api",
-                        "Properties": {
-                            "Path": "/mine",
-                            "Method": "post",
-                            "RestApiId": {"Ref": "MyApi"},
+                        "Any": {
+                            "Type": "Api",
+                            "Properties": {
+                                "Path": "/all",
+                                "Method": "any",
+                                "Auth": {"Authorizer": "X"},
+                            },
                         },
-                    },
-                    "Given": {
-                        "Type": "Api",
-                        "Properties": {
-                            "Path": "/g",
-                            "Method": "get",
-                            "RestApiId": {"Ref": "Defined"},
+                        "Mine": {
+                            "Type": "Api",
+                            "Properties": {
+                                "Path": "/mine",
+                                "Method": "post",
+                                "RestApiId": {"Ref": "MyApi"},
+                            },
                         },
-                    },
+                        "Given": {
+                            "Type": "Api",
+                            "Properties": {
+                                "Path": "/g",
+                                "Method": "get",
+                                "RestApiId": {"Ref": "Defined"},
+                            },
+                        },
+                    }
                 }
             ),
             "MyApi": {
@@ -364,9 +396,11 @@ def test_api_events_build_the_rest_api_body():
                 "Properties": {"StageName": "s", "DefinitionUri": "s3://b/api.yaml"},
             },
         },
-        Outputs={
-            "Stage": {"Value": {"Ref": "MyApi.Stage"}},
-            "Url": {"Value": {"Ref": "ServerlessRestApi"}},
+        {
+            "Outputs": {
+                "Stage": {"Value": {"Ref": "MyApi.Stage"}},
+                "Url": {"Value": {"Ref": "ServerlessRestApi"}},
+            }
         },
     )
     resources = out["Resources"]
@@ -390,7 +424,7 @@ def test_api_events_build_the_rest_api_body():
     any_arn = resources["FnAnyPermission"]["Properties"]["SourceArn"]["Fn::Sub"][0]
     assert any_arn.endswith("/*/*/all")
     assert out["Outputs"]["Stage"]["Value"] == {"Ref": "MyApiv1Stage"}
-    assert any("Auth was not converted" in n for n in notes)
+    assert any("Auth setting of the API event was not converted" in n for n in notes)
     assert any("MyApi: SAM API setting 'Cors'" in n for n in notes)
     assert any("MyApi: SAM property 'Odd'" in n for n in notes)
 
@@ -399,22 +433,24 @@ def test_http_api_events():
     out, _, notes = expand(
         {
             "Fn": function(
-                Events={
-                    "Root": {"Type": "HttpApi"},
-                    "Post": {
-                        "Type": "HttpApi",
-                        "Properties": {
-                            "Path": "/p",
-                            "Method": "POST",
-                            "PayloadFormatVersion": "1.0",
-                            "TimeoutInMillis": 5000,
-                            "Auth": {"Authorizer": "Jwt"},
+                {
+                    "Events": {
+                        "Root": {"Type": "HttpApi"},
+                        "Post": {
+                            "Type": "HttpApi",
+                            "Properties": {
+                                "Path": "/p",
+                                "Method": "POST",
+                                "PayloadFormatVersion": "1.0",
+                                "TimeoutInMillis": 5000,
+                                "Auth": {"Authorizer": "Jwt"},
+                            },
                         },
-                    },
-                    "Own": {
-                        "Type": "HttpApi",
-                        "Properties": {"Path": "/o", "Method": "get", "ApiId": {"Ref": "Http"}},
-                    },
+                        "Own": {
+                            "Type": "HttpApi",
+                            "Properties": {"Path": "/o", "Method": "get", "ApiId": {"Ref": "Http"}},
+                        },
+                    }
                 }
             ),
             "Http": {
@@ -465,30 +501,34 @@ def test_http_api_events():
     assert any("CorsConfiguration given as a single value" in n for n in notes)
     assert any("Http: SAM HTTP API setting 'Auth'" in n for n in notes)
     assert any("Http: SAM property 'Odd'" in n for n in notes)
-    assert any("FnPost: the API event's Auth was not converted" in n for n in notes)
+    assert any("FnPost: the Auth setting of the API event was not converted" in n for n in notes)
 
 
 def test_url_alias_and_unconverted_function_settings():
     out, _, notes = expand(
         {
             "Fn": function(
-                AutoPublishAlias="live",
-                FunctionUrlConfig={
-                    "AuthType": "NONE",
-                    "Cors": {"AllowOrigins": ["*"]},
-                    "InvokeMode": "BUFFERED",
-                },
-                DeploymentPreference={"Type": "Linear10PercentEvery1Minute"},
-                Events={
-                    "Queue": {"Type": "SQS", "Properties": {"Queue": "arn:q"}},
-                    "Odd": {"Type": "IoTRule"},
+                {
+                    "AutoPublishAlias": "live",
+                    "FunctionUrlConfig": {
+                        "AuthType": "NONE",
+                        "Cors": {"AllowOrigins": ["*"]},
+                        "InvokeMode": "BUFFERED",
+                    },
+                    "DeploymentPreference": {"Type": "Linear10PercentEvery1Minute"},
+                    "Events": {
+                        "Queue": {"Type": "SQS", "Properties": {"Queue": "arn:q"}},
+                        "Odd": {"Type": "IoTRule"},
+                    },
                 },
             ),
-            "Private": function(FunctionUrlConfig={}),
+            "Private": function({"FunctionUrlConfig": {}}),
         },
-        Outputs={
-            "Alias": {"Value": {"Ref": "Fn.Alias"}},
-            "Version": {"Value": {"Ref": "Fn.Version"}},
+        {
+            "Outputs": {
+                "Alias": {"Value": {"Ref": "Fn.Alias"}},
+                "Version": {"Value": {"Ref": "Fn.Version"}},
+            }
         },
     )
     resources = out["Resources"]
@@ -505,22 +545,22 @@ def test_url_alias_and_unconverted_function_settings():
         "Alias": {"Value": {"Ref": "FnAliaslive"}},
         "Version": {"Value": {"Ref": "FnVersion"}},
     }
-    assert any("DeploymentPreference was not converted" in n for n in notes)
+    assert any("the SAM setting DeploymentPreference was not converted" in n for n in notes)
     assert any("event type 'IoTRule' was not converted" in n for n in notes)
 
 
 @pytest.mark.parametrize(
     ("resources", "message"),
     [
-        ({"Fn": function(Events=["x"])}, "'Events' of 'Fn' must be a mapping"),
-        ({"Fn": function(Events={"E": "x"})}, "event 'E' of 'Fn' must be a mapping"),
+        ({"Fn": function({"Events": ["x"]})}, "'Events' of 'Fn' must be a mapping"),
+        ({"Fn": function({"Events": {"E": "x"}})}, "event 'E' of 'Fn' must be a mapping"),
     ],
 )
 def test_invalid_sam(resources, message):
     with pytest.raises(CfnError, match=message):
         expand(resources)
     with pytest.raises(CfnError, match="'Globals' must be a mapping"):
-        expand({"Fn": function()}, Globals=[1])
+        expand({"Fn": function()}, {"Globals": [1]})
 
 
 def test_simple_table_layer_and_other_types():
@@ -662,29 +702,31 @@ def test_state_machines():
 def test_connectors():
     out, _, notes = expand(
         {
-            "Fn": {
-                **function(),
-                "Connectors": {
-                    "ToTable": {
-                        "Properties": {
-                            "Destination": {"Id": "Table"},
-                            "Permissions": ["Read", "Write"],
-                        }
-                    },
-                    "ToMany": {
-                        "Properties": {
-                            "Destination": [
-                                {"Id": "Bucket"},
-                                {"Id": "Queue"},
-                                {"Id": "Topic"},
-                                {"Id": "Flow"},
-                                {"Id": "Missing"},
-                            ],
-                            "Permissions": ["Write"],
-                        }
+            "Fn": with_attributes(
+                function(),
+                {
+                    "Connectors": {
+                        "ToTable": {
+                            "Properties": {
+                                "Destination": {"Id": "Table"},
+                                "Permissions": ["Read", "Write"],
+                            }
+                        },
+                        "ToMany": {
+                            "Properties": {
+                                "Destination": [
+                                    {"Id": "Bucket"},
+                                    {"Id": "Queue"},
+                                    {"Id": "Topic"},
+                                    {"Id": "Flow"},
+                                    {"Id": "Missing"},
+                                ],
+                                "Permissions": ["Write"],
+                            }
+                        },
                     },
                 },
-            },
+            ),
             "Table": {"Type": "AWS::Serverless::SimpleTable"},
             "Bucket": {"Type": "AWS::S3::Bucket"},
             "Queue": {"Type": "AWS::SQS::Queue"},
@@ -757,7 +799,7 @@ def test_connectors():
     assert resources["RuleToFnWriteLambdaPermission"]["Properties"]["SourceArn"] == {
         "Fn::GetAtt": ["Rule", "Arn"]
     }
-    assert any("FnToMany: a connector end is not a resource" in n for n in notes)
+    assert any("FnToMany: a connector end is outside this template" in n for n in notes)
     assert any(
         "QueueToTopic: connector from AWS::SQS::Queue to AWS::SNS::Topic" in n for n in notes
     )
@@ -783,17 +825,19 @@ def test_other_transforms_are_kept():
 def test_resource_attributes_computed_tags_and_odd_definition_uri():
     out, _, _ = expand(
         {
-            "Fn": {
-                **function(Tags={"Fn::If": ["C", {"a": "b"}, {"Ref": "AWS::NoValue"}]}),
-                "Condition": "C",
-                "DeletionPolicy": "Retain",
-            },
+            "Fn": with_attributes(
+                function({"Tags": {"Fn::If": ["C", {"a": "b"}, {"Ref": "AWS::NoValue"}]}}),
+                {
+                    "Condition": "C",
+                    "DeletionPolicy": "Retain",
+                },
+            ),
             "Api": {
                 "Type": "AWS::Serverless::Api",
                 "Properties": {"StageName": "s", "DefinitionUri": {"Bucket": "b", "Key": "k"}},
             },
         },
-        Conditions={"C": {"Fn::Equals": ["a", "a"]}},
+        {"Conditions": {"C": {"Fn::Equals": ["a", "a"]}}},
     )
     resources = out["Resources"]
     assert resources["Fn"]["Properties"]["Tags"] == {
@@ -804,3 +848,24 @@ def test_resource_attributes_computed_tags_and_odd_definition_uri():
         and resources["FnRole"]["DeletionPolicy"] == "Retain"
     )
     assert resources["Api"]["Properties"]["BodyS3Location"] == {"Bucket": "b", "Key": "k"}
+
+
+def test_vpc_function_and_aliases_in_sub():
+    out, _, _ = expand(
+        {"Fn": function({"VpcConfig": {"SubnetIds": ["s"]}, "AutoPublishAlias": "live"})},
+        {
+            "Outputs": {
+                "Text": {"Value": {"Fn::Sub": "${Fn.Alias} ${Fn.Arn}"}},
+                "List": {"Value": {"Fn::Sub": ["${Fn.Version}-${x}", {"x": {"Ref": "Fn.Alias"}}]}},
+            }
+        },
+    )
+    managed = out["Resources"]["FnRole"]["Properties"]["ManagedPolicyArns"]
+    assert {
+        "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/"
+        "AWSLambdaVPCAccessExecutionRole"
+    } in managed
+    assert out["Outputs"]["Text"]["Value"] == {"Fn::Sub": "${FnAliaslive} ${Fn.Arn}"}
+    assert out["Outputs"]["List"]["Value"] == {
+        "Fn::Sub": ["${FnVersion}-${x}", {"x": {"Ref": "FnAliaslive"}}]
+    }

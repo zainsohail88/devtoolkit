@@ -5,13 +5,26 @@ from __future__ import annotations
 import json
 import re
 
-from converters.cfn import convert_template
+from converters.cfn.pipeline import convert_template
 
 NO = {"Ref": "AWS::NoValue"}
 
 
-def convert(resources: dict, **sections: object) -> tuple[str, list[str]]:
-    result = convert_template(json.dumps({"Resources": resources, **sections}), stack_name="demo")
+def convert(
+    resources: dict,
+    parameters: dict | None = None,
+    conditions: dict | None = None,
+    outputs: dict | None = None,
+) -> tuple[str, list[str]]:
+    template: dict = {"Resources": resources}
+    for section, value in (
+        ("Parameters", parameters),
+        ("Conditions", conditions),
+        ("Outputs", outputs),
+    ):
+        if value is not None:
+            template[section] = value
+    result = convert_template(json.dumps(template), stack_name="demo")
     files = {f["path"]: f["content"] for f in result["files"]}
     return files["main.tf"] + files.get("outputs.tf", ""), result["notes"]
 
@@ -25,8 +38,8 @@ def test_log_group_arn_keeps_the_stream_wildcard_also_when_conditional():
                 "Properties": {"KmsKeyId": "k"},
             }
         },
-        Conditions={"On": {"Fn::Equals": [1, 1]}},
-        Outputs={
+        conditions={"On": {"Fn::Equals": [1, 1]}},
+        outputs={
             "Arn": {"Value": {"Fn::GetAtt": ["Logs", "Arn"]}, "Condition": "On"},
             "Name": {"Value": {"Ref": "Logs"}, "Condition": "On"},
         },
@@ -57,9 +70,9 @@ def test_metric_filter_values_and_dimensions():
                 },
             }
         },
-        Parameters={"Default": {"Type": "String"}},
-        Conditions={"On": {"Fn::Equals": [1, 1]}},
-        Outputs={"Name": {"Value": {"Ref": "Filter"}}},
+        parameters={"Default": {"Type": "String"}},
+        conditions={"On": {"Fn::Equals": [1, 1]}},
+        outputs={"Name": {"Value": {"Ref": "Filter"}}},
     )
     assert "default_value = var.default" in main
     assert "apply_on_transformed_logs = false" in main
@@ -119,7 +132,7 @@ def test_alarm_metric_queries_and_dimension_maps():
                 },
             },
         },
-        Outputs={"Name": {"Value": {"Ref": "Alarm"}}},
+        outputs={"Name": {"Value": {"Ref": "Alarm"}}},
     )
     assert 'threshold_metric_id = "band"' in main
     assert 'account_id = "123456789012"' in main
@@ -146,7 +159,7 @@ def test_dashboard_body_forms():
                 },
             },
         },
-        Outputs={"Name": {"Value": {"Ref": "Text"}}},
+        outputs={"Name": {"Value": {"Ref": "Text"}}},
     )
     assert 'dashboard_body = "not json ${data.aws_region.current.region}"' in main
     assert 'dashboard_body = "{\\"widgets\\":[]}"' in main
@@ -176,8 +189,8 @@ def test_alarm_actions_drop_novalue_items():
                 },
             }
         },
-        Parameters={"Env": {"Type": "String"}},
-        Conditions={"On": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}},
+        parameters={"Env": {"Type": "String"}},
+        conditions={"On": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}},
     )
     assert (
         'alarm_actions = [for item in [local.on ? "arn:aws:sns:us-east-1:123456789012:t" : null,'
@@ -203,7 +216,7 @@ def test_alarm_metric_stat_from_a_function_is_reported():
                 },
             }
         },
-        Parameters={"Stat": {"Type": "String"}, "Metric": {"Type": "String"}},
+        parameters={"Stat": {"Type": "String"}, "Metric": {"Type": "String"}},
     )
     assert "MetricStat was not converted" in main
     assert "Metric was not converted" in main

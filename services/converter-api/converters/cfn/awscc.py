@@ -1,11 +1,12 @@
 """Any CloudFormation resource type as an `awscc` provider resource.
 
 The awscc provider is generated from the CloudFormation resource schemas, so its resources
-are the CloudFormation types one-to-one: `AWS::S3::Bucket` is `awscc_s3_bucket`, property
-`BucketName` is attribute `bucket_name`. awscc_index.json (built from the provider's schema by
-tools/build_awscc_index.py) lists the types awscc has, and, per type, the property paths whose
-keys must stay as written (maps, "m"), the JSON-document properties ("j"), and the few names
-that don't follow the usual snake_case rule ("r", "n").
+are the CloudFormation types one to one: `AWS::S3::Bucket` is `awscc_s3_bucket`, property
+`BucketName` is attribute `bucket_name`. awscc_index.json, built from the provider schema by
+tools/build_awscc_index.py, lists the types awscc has and, per type, the property paths whose
+keys stay as written (maps, "m"), the JSON document properties ("j"), the names outside the
+usual snake_case rule ("r", "n"), the properties this provider version lacks ("x") and every
+settable attribute ("a").
 """
 
 from __future__ import annotations
@@ -17,21 +18,24 @@ from typing import Any
 
 from converters.cfn import hcl
 from converters.cfn.builder import Builder, tags_map
-from converters.cfn.context import intrinsic_name, json_value
-from converters.cfn.hcl import Raw
+from converters.cfn.expressions import intrinsic_name
+from converters.cfn.models import Raw
 from converters.cfn.naming import snake
 
-_INDEX_FILE = Path(__file__).with_name("awscc_index.json")
+INDEX_FILE = Path(__file__).with_name("awscc_index.json")
+# Properties that hold Lambda code, for code the SAM or CDK step found in a local folder.
+CODE_PROPERTIES = {"AWS::Lambda::Function": "Code", "AWS::Lambda::LayerVersion": "Content"}
 
 
 @cache
-def _index() -> dict[str, dict[str, Any]]:
-    return json.loads(_INDEX_FILE.read_text(encoding="utf-8"))
+def awscc_index() -> dict[str, dict[str, Any]]:
+    """The index, read once."""
+    return json.loads(INDEX_FILE.read_text(encoding="utf-8"))
 
 
 def awscc_type(cfn_type: str) -> str | None:
-    """The awscc resource type for a CloudFormation type, or None if awscc has none."""
-    entry = _index().get(cfn_type)
+    """The awscc resource type for a CloudFormation type, or None when awscc has none."""
+    entry = awscc_index().get(cfn_type)
     if entry is None:
         return None
     if "n" in entry:
@@ -40,9 +44,12 @@ def awscc_type(cfn_type: str) -> str | None:
     return f"awscc_{service.lower()}_{snake(kind)}"
 
 
-class _Shapes:
+class AwsccShapes:
+    """What the index says about one resource type."""
+
     def __init__(self, cfn_type: str) -> None:
-        entry = _index().get(cfn_type, {})
+        """The index entry of `cfn_type`."""
+        entry = awscc_index().get(cfn_type, {})
         self.maps = set(entry.get("m", ()))
         self.json = set(entry.get("j", ()))
         self.renames: dict[str, str] = entry.get("r", {})
@@ -50,81 +57,104 @@ class _Shapes:
         self.settable = set(entry.get("a", "").split())
 
     def name(self, path: str, prop: str) -> str:
+        """The attribute name of the property at `path`."""
         return self.renames.get(path) or snake(prop)
 
 
-# Properties that hold Lambda code, for code the SAM or CDK step found in a local folder.
-_CODE_PROPERTIES = {"AWS::Lambda::Function": "Code", "AWS::Lambda::LayerVersion": "Content"}
+class AwsccConverter:
+    """Converts one resource with the awscc provider."""
 
+    def __init__(self, builder: Builder) -> None:
+        """Convert the resource `builder` holds."""
+        self.b = builder
+        self.ctx = builder.ctx
+        self.shapes = AwsccShapes(builder.info.cfn_type)
 
-def convert_awscc(b: Builder) -> None:
-    """Every property of the resource as an awscc attribute. Properties this awscc version
-    doesn't have stay behind for Props.finish() to report."""
-    shapes = _Shapes(b.info.cfn_type)
-    code = _CODE_PROPERTIES.get(b.info.cfn_type)
-    if code and b.hints.get("code_path"):
-        _local_code(b, code)
-    for prop in list(b.props.values):
-        if prop in shapes.missing or shapes.name(prop, prop) not in shapes.settable:
-            continue
-        value = b.props.take(prop)
-        if value is None:
-            continue
-        b.props.set(shapes.name(prop, prop), _value(b, shapes, value, prop))
+    def convert(self) -> None:
+        """Every property as an awscc attribute. Properties this awscc version lacks stay
+        behind for Props.finish() to report."""
+        code = CODE_PROPERTIES.get(self.b.info.cfn_type)
+        if code and self.b.hints.get("code_path"):
+            self.local_code(code)
+        for prop in list(self.b.props.values):
+            name = self.shapes.name(prop, prop)
+            if prop in self.shapes.missing or name not in self.shapes.settable:
+                continue
+            value = self.b.props.take(prop)
+            if value is not None:
+                self.b.props.set(name, self.value(value, prop))
 
+    def local_code(self, prop: str) -> None:
+        """awscc reads Lambda code from S3 only, so code from a local folder becomes
+        variables for the bucket and key the user uploads it to."""
+        b = self.b
+        b.props.drop(prop)
+        path = b.hints["code_path"]
+        where = f"zipped code of {b.logical_id} (from {path})"
+        bucket = self.ctx.placeholder_variable(
+            f"{b.logical_id}_code_bucket", f"The S3 bucket holding the {where}"
+        )
+        key = self.ctx.placeholder_variable(
+            f"{b.logical_id}_code_key", f"The S3 key of the {where}"
+        )
+        b.props.set(snake(prop), {"s3_bucket": Raw(bucket), "s3_key": Raw(key)})
+        self.ctx.note(
+            f"{b.logical_id}: the awscc provider takes Lambda code from S3 only; zip {path}, "
+            f"upload it and set {bucket} and {key}; the aws provider zips it for you"
+        )
 
-def _local_code(b: Builder, prop: str) -> None:
-    """awscc reads Lambda code from S3 only, so code from a local folder becomes variables
-    for the bucket and key the user uploads it to."""
-    b.props.drop(prop)
-    path = b.hints["code_path"]
-    where = f"the S3 {{}} holding the zipped code of {b.logical_id} (from {path})"
-    bucket = b.ctx.placeholder_variable(f"{b.logical_id}_code_bucket", where.format("bucket"))
-    key = b.ctx.placeholder_variable(f"{b.logical_id}_code_key", where.format("key"))
-    b.props.set(snake(prop), {"s3_bucket": Raw(bucket), "s3_key": Raw(key)})
-    b.ctx.note(
-        f"{b.logical_id}: the awscc provider takes Lambda code from S3 only; zip {path}, upload "
-        f"it, and set {bucket} and {key} (or use the aws provider, which zips it for you)"
-    )
+    def value(self, value: Any, path: str) -> Any:
+        """One property value, shaped the way the attribute at `path` expects."""
+        if path in self.shapes.json:
+            return self.ctx.json(value)
+        if path in self.shapes.maps and isinstance(value, list):
+            # Tags written as [{Key, Value}] for a resource whose awscc tags are a map.
+            return tags_map(self.ctx, value)
+        if isinstance(value, list):
+            return self.sequence(value, path)
+        if not isinstance(value, dict):
+            return value
+        function = intrinsic_name(value)
+        if function == "Fn::If":
+            return self.conditional(value[function], path, value)
+        if function is not None:
+            return self.ctx.expr(value)
+        if path in self.shapes.maps:
+            return {str(key): self.ctx.expr(item) for key, item in value.items()}
+        return self.structure(value, path)
 
+    def sequence(self, items: list[Any], path: str) -> Any:
+        """A list. As in ExpressionConverter.sequence, NoValue items go and
+        `!If [C, x, NoValue]` items are filtered."""
+        kept = [item for item in items if not self.ctx.is_no_value(item)]
+        converted = [self.value(item, path) for item in kept]
+        if any(self.ctx.optional_item(item)[0] for item in kept):
+            return Raw(f"[for item in {hcl.inline(converted)} : item if item != null]")
+        return converted
 
-def _value(b: Builder, shapes: _Shapes, value: Any, path: str) -> Any:
-    ctx = b.ctx
-    if path in shapes.json:
-        return json_value(ctx, value)
-    if path in shapes.maps and isinstance(value, list):
-        # Tags written as [{Key, Value}] for a resource whose awscc tags are a map.
-        return tags_map(ctx, value)
-    if isinstance(value, list):
-        # As in Context.expr: NoValue items go, and `!If [C, x, NoValue]` items are filtered.
-        kept = [item for item in value if not ctx.is_no_value(item)]
-        items = [_value(b, shapes, item, path) for item in kept]
-        if any(ctx.optional_item(item)[0] for item in kept):
-            return Raw(f"[for item in {hcl.inline(items)} : item if item != null]")
-        return items
-    if not isinstance(value, dict):
-        return value
-    function = intrinsic_name(value)
-    if function == "Fn::If" and isinstance(value[function], list) and len(value[function]) == 3:
-        # Convert both branches with this path's shape, so their keys are named right.
-        name, yes, no = value[function]
-        yes_text = hcl.inline(_value(b, shapes, yes, path))
-        no_text = hcl.inline(_value(b, shapes, no, path))
-        return Raw(f"{ctx.condition(name)} ? {yes_text} : {no_text}")
-    if function is not None:
-        return ctx.expr(value)
-    if path in shapes.maps:
-        return {str(k): ctx.expr(v) for k, v in value.items()}
-    result: dict[str, Any] = {}
-    for key, item in value.items():
-        child = f"{path}.{key}"
-        if ctx.is_no_value(item):
-            continue
-        if child in shapes.missing:
-            b.ctx.note(
-                f"{b.info.logical_id} ({b.info.cfn_type}): property '{b.logical_id}.{child}' "
-                f"is not in {b.info.tf_type} yet and was left out; set it by hand"
-            )
-            continue
-        result[shapes.name(child, str(key))] = _value(b, shapes, item, child)
-    return result
+    def conditional(self, args: Any, path: str, original: dict[str, Any]) -> Any:
+        """An Fn::If with both branches shaped for this path, so their keys are named
+        right."""
+        if not isinstance(args, list) or len(args) != 3:
+            return self.ctx.expr(original)
+        name, yes, no = args
+        yes_text = hcl.inline(self.value(yes, path))
+        no_text = hcl.inline(self.value(no, path))
+        return Raw(f"{self.ctx.condition(name)} ? {yes_text} : {no_text}")
+
+    def structure(self, value: dict[str, Any], path: str) -> dict[str, Any]:
+        """A nested object with attribute names from the index."""
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            child = f"{path}.{key}"
+            if self.ctx.is_no_value(item):
+                continue
+            if child in self.shapes.missing:
+                self.ctx.note(
+                    f"{self.b.logical_id} ({self.b.info.cfn_type}): property "
+                    f"'{self.b.logical_id}.{child}' is missing from {self.b.info.tf_type} in "
+                    "this provider version and was left out; set it by hand"
+                )
+                continue
+            result[self.shapes.name(child, str(key))] = self.value(item, child)
+        return result

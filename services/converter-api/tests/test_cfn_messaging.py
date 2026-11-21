@@ -5,14 +5,28 @@ from __future__ import annotations
 import json
 import re
 
-from converters.cfn import convert_template
+from converters.cfn.pipeline import convert_template
+from converters.cfn.resources.messaging import sub_json
 
 DOC = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]}
 ROLE = "arn:aws:iam::123456789012:role/r"
 
 
-def convert(resources: dict, **sections: object) -> tuple[str, list[str]]:
-    result = convert_template(json.dumps({"Resources": resources, **sections}), stack_name="demo")
+def convert(
+    resources: dict,
+    parameters: dict | None = None,
+    conditions: dict | None = None,
+    outputs: dict | None = None,
+) -> tuple[str, list[str]]:
+    template: dict = {"Resources": resources}
+    for section, value in (
+        ("Parameters", parameters),
+        ("Conditions", conditions),
+        ("Outputs", outputs),
+    ):
+        if value is not None:
+            template[section] = value
+    result = convert_template(json.dumps(template), stack_name="demo")
     files = {f["path"]: f["content"] for f in result["files"]}
     return files["main.tf"] + files.get("outputs.tf", ""), result["notes"]
 
@@ -20,7 +34,7 @@ def convert(resources: dict, **sections: object) -> tuple[str, list[str]]:
 def test_queue_reference_attributes():
     main, notes = convert(
         {"Q": {"Type": "AWS::SQS::Queue", "Properties": {"VisibilityTimeout": "30"}}},
-        Outputs={
+        outputs={
             "Url": {"Value": {"Ref": "Q"}},
             "Arn": {"Value": {"Fn::GetAtt": ["Q", "Arn"]}},
             "Name": {"Value": {"Fn::GetAtt": ["Q", "QueueName"]}},
@@ -76,8 +90,8 @@ def test_topic_subscriptions():
                 "Properties": {"Topics": [{"Ref": "One"}], "PolicyDocument": DOC},
             },
         },
-        Conditions={"On": {"Fn::Equals": [1, 1]}},
-        Outputs={"Name": {"Value": {"Fn::GetAtt": ["One", "TopicName"]}}},
+        conditions={"On": {"Fn::Equals": [1, 1]}},
+        outputs={"Name": {"Value": {"Fn::GetAtt": ["One", "TopicName"]}}},
     )
     assert 'resource "aws_sns_topic_subscription" "one_subscription"' in main
     assert "topic_arn = aws_sns_topic.one.arn" in main
@@ -191,7 +205,7 @@ def test_rule_targets_of_every_kind():
                 "Properties": {"Targets": {"Fn::If": ["On", [], []]}},
             },
         },
-        Conditions={"On": {"Fn::Equals": [1, 1]}},
+        conditions={"On": {"Fn::Equals": [1, 1]}},
     )
     assert 'resource "aws_cloudwatch_event_target" "rule_target_1"' in main
     assert "event_bus_name" not in main.split('"rule_target_1"')[1].split("}")[0]
@@ -216,31 +230,33 @@ def test_event_bus_without_policy_and_plain_stream():
     assert any("Stream had no Name" in n for n in notes)
 
 
-def _machine(**props: object) -> dict:
+def _machine(props: dict) -> dict:
     return {
-        "M": {"Type": "AWS::StepFunctions::StateMachine", "Properties": {"RoleArn": ROLE, **props}}
+        "M": {"Type": "AWS::StepFunctions::StateMachine", "Properties": {"RoleArn": ROLE} | props}
     }
 
 
 def test_definition_substitutions_on_an_object():
     main, notes = convert(
         _machine(
-            Definition={
-                "StartAt": "A",
-                "States": {
-                    "A": {
-                        "Type": "Task",
-                        "Resource": "${Fn}",
-                        "Comment": "calls ${Fn} with ${Other}",
-                        "Next": "${Missing}",
-                        "Branches": [{"Note": "plain"}],
-                    }
+            {
+                "Definition": {
+                    "StartAt": "A",
+                    "States": {
+                        "A": {
+                            "Type": "Task",
+                            "Resource": "${Fn}",
+                            "Comment": "calls ${Fn} with ${Other}",
+                            "Next": "${Missing}",
+                            "Branches": [{"Note": "plain"}],
+                        }
+                    },
                 },
-            },
-            DefinitionSubstitutions={"Fn": {"Fn::GetAtt": ["Q", "Arn"]}},
+                "DefinitionSubstitutions": {"Fn": {"Fn::GetAtt": ["Q", "Arn"]}},
+            }
         )
         | {"Q": {"Type": "AWS::SQS::Queue"}},
-        Outputs={"Name": {"Value": {"Fn::GetAtt": ["M", "Name"]}}},
+        outputs={"Name": {"Value": {"Fn::GetAtt": ["M", "Name"]}}},
     )
     assert "Resource = aws_sqs_queue.q.arn" in main
     assert '"calls ${aws_sqs_queue.q.arn} with $${Other}"' in main
@@ -251,39 +267,37 @@ def test_definition_substitutions_on_an_object():
 
 def test_definition_string_forms():
     main, notes = convert(
-        {
-            **_machine(DefinitionString='{"StartAt": "A", "States": {}}'),
-            **{
-                "Bad": {
-                    "Type": "AWS::StepFunctions::StateMachine",
-                    "Properties": {
-                        "RoleArn": ROLE,
-                        "DefinitionString": "not json ${X}",
-                        "DefinitionSubstitutions": {"X": "1"},
+        _machine({"DefinitionString": '{"StartAt": "A", "States": {}}'})
+        | {
+            "Bad": {
+                "Type": "AWS::StepFunctions::StateMachine",
+                "Properties": {
+                    "RoleArn": ROLE,
+                    "DefinitionString": "not json ${X}",
+                    "DefinitionSubstitutions": {"X": "1"},
+                },
+            },
+            "SubList": {
+                "Type": "AWS::StepFunctions::StateMachine",
+                "Properties": {
+                    "RoleArn": ROLE,
+                    "DefinitionString": {
+                        "Fn::Sub": ['{"StartAt": "${S}", "States": {}}', {"S": "First"}]
                     },
                 },
-                "SubList": {
-                    "Type": "AWS::StepFunctions::StateMachine",
-                    "Properties": {
-                        "RoleArn": ROLE,
-                        "DefinitionString": {
-                            "Fn::Sub": ['{"StartAt": "${S}", "States": {}}', {"S": "First"}]
-                        },
-                    },
+            },
+            "SubText": {
+                "Type": "AWS::StepFunctions::StateMachine",
+                "Properties": {
+                    "RoleArn": ROLE,
+                    "DefinitionString": {"Fn::Sub": "not ${AWS::Region}"},
                 },
-                "SubText": {
-                    "Type": "AWS::StepFunctions::StateMachine",
-                    "Properties": {
-                        "RoleArn": ROLE,
-                        "DefinitionString": {"Fn::Sub": "not ${AWS::Region}"},
-                    },
-                },
-                "Joined": {
-                    "Type": "AWS::StepFunctions::StateMachine",
-                    "Properties": {
-                        "RoleArn": ROLE,
-                        "DefinitionString": {"Fn::Join": ["", ['{"StartAt":', '"A"}']]},
-                    },
+            },
+            "Joined": {
+                "Type": "AWS::StepFunctions::StateMachine",
+                "Properties": {
+                    "RoleArn": ROLE,
+                    "DefinitionString": {"Fn::Join": ["", ['{"StartAt":', '"A"}']]},
                 },
             },
         }
@@ -297,8 +311,6 @@ def test_definition_string_forms():
 
 
 def test_sub_json_keeps_plain_placeholders():
-    from converters.cfn.resources.messaging import sub_json
-
     assert sub_json({"Fn::Sub": '{"a": "${AWS::Region}", "b": ["x"]}'}) == {
         "a": {"Fn::Sub": "${AWS::Region}"},
         "b": ["x"],
@@ -333,17 +345,19 @@ def test_bus_policy_rule_on_a_bus_and_stream_encryption():
 
 def test_log_destinations():
     main, _ = convert(
-        {
-            **_machine(
-                Definition={"StartAt": "A", "States": {}},
-                LoggingConfiguration={
+        _machine(
+            {
+                "Definition": {"StartAt": "A", "States": {}},
+                "LoggingConfiguration": {
                     "Level": "ALL",
                     "Destinations": [
                         {"CloudWatchLogsLogGroup": {"LogGroupArn": "arn:aws:logs:r:1:log-group:g"}}
                     ],
                 },
-                EncryptionConfiguration={"Type": "AWS_OWNED_KEY"},
-            ),
+                "EncryptionConfiguration": {"Type": "AWS_OWNED_KEY"},
+            }
+        )
+        | {
             "Kept": {
                 "Type": "AWS::StepFunctions::StateMachine",
                 "Properties": {
@@ -389,7 +403,7 @@ def test_log_destinations():
                 },
             },
         },
-        Parameters={"LogArn": {"Type": "String"}},
+        parameters={"LogArn": {"Type": "String"}},
     )
     assert 'log_destination = "arn:aws:logs:r:1:log-group:g:*"' in main
     assert main.count(':log-group:g:*"') == 2
@@ -433,9 +447,9 @@ def test_policies_for_optional_queues_and_topics_are_counted():
                 "Properties": {"PolicyDocument": DOC, "Topics": [_if({"Ref": "T"})]},
             },
         },
-        Parameters=ENV,
-        Conditions=ON,
-        Outputs={"Id": {"Value": {"Ref": "TP"}}},
+        parameters=ENV,
+        conditions=ON,
+        outputs={"Id": {"Value": {"Ref": "TP"}}},
     )
     main = squash(main)
     main_policy = _block(main, 'resource "aws_sqs_queue_policy" "qp"')
@@ -475,8 +489,8 @@ def test_optional_subscriptions_and_rule_targets_are_counted():
                 },
             },
         },
-        Parameters={**ENV, "Targets": {"Type": "String"}},
-        Conditions=ON,
+        parameters=ENV | {"Targets": {"Type": "String"}},
+        conditions=ON,
     )
     main = squash(main)
     subscription = _block(main, 'resource "aws_sns_topic_subscription" "topic_subscription_1"')
@@ -495,30 +509,31 @@ def test_optional_subscriptions_and_rule_targets_are_counted():
     assert any("'Rule.Targets[2]' is computed by a function" in n for n in notes)
 
 
-def test_ecs_target_network_configuration_from_functions():
-    def rule(network: object) -> dict:
-        return {
-            "Type": "AWS::Events::Rule",
-            "Properties": {
-                "ScheduleExpression": "rate(1 hour)",
-                "Targets": [
-                    {
-                        "Id": "t",
-                        "Arn": "arn:aws:ecs:us-east-1:123456789012:cluster/c",
-                        "RoleArn": ROLE,
-                        "EcsParameters": {
-                            "TaskDefinitionArn": "arn:task-definition/t:1",
-                            "NetworkConfiguration": network,
-                            "ArrayProperties": {"Ref": "Size"},
-                        },
-                    }
-                ],
-            },
-        }
+def _ecs_rule(network: object) -> dict:
+    return {
+        "Type": "AWS::Events::Rule",
+        "Properties": {
+            "ScheduleExpression": "rate(1 hour)",
+            "Targets": [
+                {
+                    "Id": "t",
+                    "Arn": "arn:aws:ecs:us-east-1:123456789012:cluster/c",
+                    "RoleArn": ROLE,
+                    "EcsParameters": {
+                        "TaskDefinitionArn": "arn:task-definition/t:1",
+                        "NetworkConfiguration": network,
+                        "ArrayProperties": {"Ref": "Size"},
+                    },
+                }
+            ],
+        },
+    }
 
+
+def test_ecs_target_network_configuration_from_functions():
     main, notes = convert(
         {
-            "Public": rule(
+            "Public": _ecs_rule(
                 {
                     "AwsVpcConfiguration": {
                         "Subnets": ["subnet-1"],
@@ -526,11 +541,11 @@ def test_ecs_target_network_configuration_from_functions():
                     }
                 }
             ),
-            "Computed": rule({"Ref": "Network"}),
-            "Inner": rule({"AwsVpcConfiguration": {"Ref": "Network"}}),
+            "Computed": _ecs_rule({"Ref": "Network"}),
+            "Inner": _ecs_rule({"AwsVpcConfiguration": {"Ref": "Network"}}),
         },
-        Parameters={**ENV, "Network": {"Type": "String"}, "Size": {"Type": "String"}},
-        Conditions=ON,
+        parameters=ENV | {"Network": {"Type": "String"}, "Size": {"Type": "String"}},
+        conditions=ON,
     )
     main = squash(main)
     assert 'assign_public_ip = (local.on ? "ENABLED" : "DISABLED") == "ENABLED"' in main
@@ -577,7 +592,7 @@ def test_definition_substitutions_stay_text():
                 },
             }
         },
-        Parameters={"Retries": {"Type": "Number"}, "Name": {"Type": "String"}},
+        parameters={"Retries": {"Type": "Number"}, "Name": {"Type": "String"}},
     )
     main = squash(main)
     for line in ('n = "5"', 'f = "1.5"', 'b = "true"', "p = tostring(var.retries)", "s = var.name"):

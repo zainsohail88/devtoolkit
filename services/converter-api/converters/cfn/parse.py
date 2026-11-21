@@ -13,18 +13,16 @@ from typing import Any
 
 import yaml
 
-from converters.compose_to_k8s import SafeMergeLoader, check_yaml_limits
+from converters.cfn.constants import (
+    MAX_DEPTH,
+    MAX_NODES,
+    MAX_TEMPLATE_CHARS,
+    SAM_TRANSFORM,
+)
+from converters.cfn.errors import CfnError
+from converters.yaml_safety import SafeMergeLoader, check_yaml_limits
 
-# CloudFormation accepts up to 1 MB from S3. 500,000 characters covers large CDK stacks
-# while keeping one request to well under a second of CPU.
-MAX_TEMPLATE_CHARS = 500_000
-MAX_NODES = 100_000
-MAX_DEPTH = 100
-
-SAM_TRANSFORM = "AWS::Serverless-2016-10-31"
-LANGUAGE_EXTENSIONS = "AWS::LanguageExtensions"
-
-_TOP_LEVEL = {
+TOP_LEVEL = {
     "AWSTemplateFormatVersion",
     "Description",
     "Metadata",
@@ -39,7 +37,7 @@ _TOP_LEVEL = {
     "Hooks",
 }
 
-_FUNCTIONS = {
+FUNCTIONS = {
     "And",
     "Base64",
     "Cidr",
@@ -62,21 +60,7 @@ _FUNCTIONS = {
 }
 
 
-class CfnError(ValueError):
-    """Raised when a template cannot be read or converted.
-
-    `message` describes the user's input and is safe to show them. `line` and `column` are
-    1-based, set for syntax errors.
-    """
-
-    def __init__(self, message: str, line: int | None = None, column: int | None = None) -> None:
-        super().__init__(message)
-        self.message = message
-        self.line = line
-        self.column = column
-
-
-class _CfnLoader(SafeMergeLoader):
+class CfnLoader(SafeMergeLoader):
     """Safe YAML loader for CloudFormation: short-form tags, and YAML 1.2 scalars.
 
     Under YAML 1.1 (PyYAML's default) `2010-09-09` is a date, `on` is True and `0755` is 493.
@@ -85,30 +69,31 @@ class _CfnLoader(SafeMergeLoader):
     """
 
 
-_NULL = re.compile(r"^(?:~|null|Null|NULL|)$")
-_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
-_INT = re.compile(r"^[-+]?(?:0|[1-9][0-9]*)$")
-_FLOAT = re.compile(r"^[-+]?(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$")
+NULL = re.compile(r"^(?:~|null|Null|NULL|)$")
+BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
+INT = re.compile(r"^[-+]?(?:0|[1-9][0-9]*)$")
+FLOAT = re.compile(r"^[-+]?(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$")
 
-_CfnLoader.yaml_implicit_resolvers = {}
+CfnLoader.yaml_implicit_resolvers = {}
 for _tag, _pattern, _first in (
-    ("tag:yaml.org,2002:null", _NULL, ["~", "n", "N", ""]),
-    ("tag:yaml.org,2002:bool", _BOOL, list("tTfF")),
-    ("tag:yaml.org,2002:int", _INT, list("-+0123456789")),
-    ("tag:yaml.org,2002:float", _FLOAT, list("-+.0123456789")),
+    ("tag:yaml.org,2002:null", NULL, ["~", "n", "N", ""]),
+    ("tag:yaml.org,2002:bool", BOOL, list("tTfF")),
+    ("tag:yaml.org,2002:int", INT, list("-+0123456789")),
+    ("tag:yaml.org,2002:float", FLOAT, list("-+.0123456789")),
     ("tag:yaml.org,2002:merge", re.compile(r"^(?:<<)$"), ["<"]),
 ):
-    _CfnLoader.add_implicit_resolver(_tag, _pattern, _first)
+    CfnLoader.add_implicit_resolver(_tag, _pattern, _first)
 
 
-def _construct_bool(loader: yaml.SafeLoader, node: yaml.ScalarNode) -> bool:
+def construct_bool(loader: yaml.SafeLoader, node: yaml.ScalarNode) -> bool:
+    """true/false in any case CloudFormation accepts, as a boolean."""
     return loader.construct_scalar(node).lower() == "true"
 
 
-_CfnLoader.add_constructor("tag:yaml.org,2002:bool", _construct_bool)
+CfnLoader.add_constructor("tag:yaml.org,2002:bool", construct_bool)
 
 
-def _construct_tag(loader: yaml.SafeLoader, suffix: str, node: yaml.Node) -> dict[str, Any]:
+def construct_tag(loader: yaml.SafeLoader, suffix: str, node: yaml.Node) -> dict[str, Any]:
     """`!Name value` -> `{"Fn::Name": value}` (`!Ref` and `!Condition` keep their name)."""
     if isinstance(node, yaml.ScalarNode):
         value: Any = loader.construct_scalar(node)
@@ -120,7 +105,7 @@ def _construct_tag(loader: yaml.SafeLoader, suffix: str, node: yaml.Node) -> dic
         return {"Ref": value}
     if suffix == "Condition":
         return {"Condition": value}
-    if suffix not in _FUNCTIONS:
+    if suffix not in FUNCTIONS:
         mark = node.start_mark
         raise CfnError(f"Unknown YAML tag '!{suffix}'", mark.line + 1, mark.column + 1)
     if suffix == "GetAtt" and isinstance(value, str):
@@ -130,10 +115,11 @@ def _construct_tag(loader: yaml.SafeLoader, suffix: str, node: yaml.Node) -> dic
     return {f"Fn::{suffix}": value}
 
 
-_CfnLoader.add_multi_constructor("!", _construct_tag)
+CfnLoader.add_multi_constructor("!", construct_tag)
 
 
-def _syntax_error(exc: yaml.YAMLError) -> CfnError:
+def syntax_error(exc: yaml.YAMLError) -> CfnError:
+    """A YAML syntax error as a CfnError with its position."""
     # Only the parser's description of the input reaches the user, never the exception text.
     problem = getattr(exc, "problem", None) or "syntax error"
     mark = getattr(exc, "problem_mark", None)
@@ -144,10 +130,10 @@ def _syntax_error(exc: yaml.YAMLError) -> CfnError:
 
 # CloudFormation's rule for logical IDs, and for parameter, condition, mapping and output
 # names. Enforcing it also keeps every name safe to use in generated HCL.
-_NAME = re.compile(r"^[A-Za-z0-9]{1,255}$")
+NAME = re.compile(r"^[A-Za-z0-9]{1,255}$")
 
 
-def _check_shape(data: Any) -> None:
+def check_shape(data: Any) -> None:
     """Depth and size limits on loaded data, without recursion. Infinite or NaN numbers
     (YAML `.inf`, `1e400`) are rejected: no CloudFormation value is one."""
     stack: list[tuple[Any, int]] = [(data, 0)]
@@ -190,19 +176,19 @@ def load_template(text: str) -> dict[str, Any]:
     else:
         try:
             check_yaml_limits(text, max_depth=MAX_DEPTH, max_nodes=MAX_NODES)
-            loader = _CfnLoader(text)
+            loader = CfnLoader(text)
             try:
                 data = loader.get_single_data()
             finally:
                 loader.dispose()
         except yaml.YAMLError as exc:
-            raise _syntax_error(exc) from exc
+            raise syntax_error(exc) from exc
         except ValueError as exc:
-            # check_yaml_limits raises ComposeError, a ValueError with a user-safe message.
+            # check_yaml_limits raises YamlLimitError, a ValueError with a user-safe message.
             if isinstance(exc, CfnError):
                 raise
             raise CfnError(getattr(exc, "message", "Template too large")) from exc
-    _check_shape(data)
+    check_shape(data)
     validate_template(data)
     return data
 
@@ -238,7 +224,7 @@ def validate_template(data: Any) -> None:
             raise CfnError(f"Invalid template: output '{name}' needs a 'Value'")
     for section in ("Resources", "Parameters", "Conditions", "Mappings", "Outputs"):
         for name in data.get(section) or {}:
-            if not isinstance(name, str) or not _NAME.match(name):
+            if not isinstance(name, str) or not NAME.match(name):
                 raise CfnError(
                     f"Invalid template: '{name}' in {section} must be letters and digits only "
                     "(A-Z, a-z, 0-9)"
@@ -246,6 +232,7 @@ def validate_template(data: Any) -> None:
 
 
 def transforms(template: dict[str, Any]) -> list[str]:
+    """The names of the transforms the template declares."""
     value = template.get("Transform")
     if value is None:
         return []
@@ -267,4 +254,5 @@ def detect_source(template: dict[str, Any]) -> str:
 
 
 def unknown_sections(template: dict[str, Any]) -> list[str]:
-    return [str(name) for name in template if name not in _TOP_LEVEL]
+    """Top-level sections that are no part of a CloudFormation template."""
+    return [str(name) for name in template if name not in TOP_LEVEL]

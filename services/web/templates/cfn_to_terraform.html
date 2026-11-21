@@ -5,7 +5,7 @@
 <div class="flex flex-wrap items-end justify-between gap-4">
   <div>
     <h1 class="text-step-2 font-semibold">CloudFormation → Terraform</h1>
-    <p class="mt-1 max-w-measure text-ink-muted">CloudFormation, AWS SAM and <code class="font-mono">cdk synth</code> templates, in JSON or YAML. References become Terraform expressions, SAM shortcuts are expanded the way SAM does it, and anything without an exact equivalent is listed for you to decide.</p>
+    <p class="mt-1 max-w-measure text-ink-muted">CloudFormation, AWS SAM and <code class="font-mono">cdk synth</code> templates in JSON or YAML. References become Terraform expressions, SAM shortcuts expand the way SAM expands them and whatever converts only in part is listed for you to decide.</p>
   </div>
 </div>
 
@@ -26,7 +26,7 @@
     <div class="editor" data-editor data-placeholder="Resources:&#10;  Bucket:&#10;    Type: AWS::S3::Bucket">
       <textarea name="template" rows="18" spellcheck="false" aria-label="CloudFormation template" class="field font-mono text-small" data-editor-source>{{ template }}</textarea>
     </div>
-    <p class="text-small text-ink-muted">Drop a file onto the editor, or press <kbd class="rounded-sm border border-hairline px-1 font-mono">Ctrl</kbd>+<kbd class="rounded-sm border border-hairline px-1 font-mono">Enter</kbd> to convert. For CDK, run <code class="font-mono">cdk synth</code> and use <code class="font-mono">cdk.out/&lt;Stack&gt;.template.json</code>.</p>
+    <p class="text-small text-ink-muted">Drop a file onto the editor or press <kbd class="rounded-sm border border-hairline px-1 font-mono">Ctrl</kbd>+<kbd class="rounded-sm border border-hairline px-1 font-mono">Enter</kbd> to convert. For a CDK app, run <code class="font-mono">cdk synth</code> and convert <code class="font-mono">cdk.out/&lt;Stack&gt;.template.json</code>.</p>
 
     <div class="grid gap-4 rounded-lg border border-divider bg-surface-raised p-4">
       <div class="flex flex-wrap items-end gap-x-6 gap-y-4">
@@ -56,7 +56,7 @@
         </label>
         <button type="submit" class="btn btn-primary ml-auto" data-submit>{% include "icons/play.svg" %} Convert</button>
       </div>
-      <p id="stack-name-help" class="text-small text-ink-muted">The stack name is the default for <code class="font-mono">var.stack_name</code>, which stands in for <code class="font-mono">AWS::StackName</code>. Import blocks let Terraform adopt what the stack already created instead of creating it again.</p>
+      <p id="stack-name-help" class="text-small text-ink-muted">The stack name is the default for <code class="font-mono">var.stack_name</code>, which stands in for <code class="font-mono">AWS::StackName</code>. Import blocks let Terraform adopt what the stack created.</p>
     </div>
   </section>
 

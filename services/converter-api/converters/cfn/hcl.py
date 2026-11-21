@@ -1,9 +1,9 @@
-"""A small HCL model and a renderer whose output already matches `terraform fmt`.
+"""Renders the HCL syntax tree (converters/cfn/models.py) as text that already matches
+`terraform fmt`.
 
-Values are plain Python data (None, bool, int, float, str, list, dict) plus three wrappers:
-Raw for an expression that is already HCL (`var.name`, `"${var.a}-x"`), Call for a function
-call whose argument is rendered as HCL (`jsonencode({...})`), and Comment for a comment line
-inside an object or a body.
+Values are plain Python data (None, bool, int, float, str, list, dict) plus Raw for an
+expression that is already HCL, Call for a function call whose argument is rendered as HCL
+and Comment for a comment line inside an object or a body.
 """
 
 from __future__ import annotations
@@ -11,52 +11,15 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass, field
 from typing import Any
+
+from converters.cfn.models import BLANK, Attr, Block, Call, Comment, Raw
 
 INDENT = "  "
 # A list of plain values stays on one line when it fits in this many characters.
-_INLINE_WIDTH = 80
-_BARE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
-_KEYWORDS = frozenset({"true", "false", "null", "for", "in", "if"})
-
-
-@dataclass(frozen=True)
-class Raw:
-    """An HCL expression, written exactly as given."""
-
-    text: str
-
-
-@dataclass(frozen=True)
-class Call:
-    """`fn(arg)`, with `arg` rendered as an HCL value (so it can span several lines)."""
-
-    fn: str
-    arg: Any
-
-
-@dataclass(frozen=True)
-class Comment:
-    """A `#` comment line in a body or an object."""
-
-    text: str
-
-
-@dataclass
-class Attr:
-    name: str
-    value: Any
-
-
-@dataclass
-class Block:
-    type: str
-    labels: list[str] = field(default_factory=list)
-    body: list[Any] = field(default_factory=list)
-
-
-BLANK = Comment("\0blank")
+INLINE_WIDTH = 80
+BARE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+KEYWORDS = frozenset({"true", "false", "null", "for", "in", "if"})
 
 
 def quote(text: str) -> str:
@@ -74,18 +37,27 @@ def quote(text: str) -> str:
 
 
 def template_text(text: str) -> str:
-    """Literal text for the inside of a template string (same escapes as quote, no quotes)."""
+    """Literal text for the inside of a template string: the escapes of quote(), without
+    the quotes."""
     return quote(text)[1:-1]
 
 
 def key(name: str) -> str:
     """An object key: bare when it is a plain identifier, quoted otherwise."""
-    if _BARE_KEY.match(name) and name not in _KEYWORDS:
+    if BARE_KEY.match(name) and name not in KEYWORDS:
         return name
     return quote(name)
 
 
-def _number(value: int | float) -> str:
+def object_key(name: Any) -> str:
+    """An object key, or `(expression)` for a key computed by an expression."""
+    if isinstance(name, Raw):
+        return f"({name.text})"
+    return key(str(name))
+
+
+def number(value: int | float) -> str:
+    """A number as HCL writes it: 3 for 3.0, quoted text for infinity and NaN."""
     if isinstance(value, float):
         if not math.isfinite(value):
             return quote(str(value))
@@ -102,7 +74,7 @@ def render(value: Any, level: int = 0) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int | float):
-        return _number(value)
+        return number(value)
     if isinstance(value, str):
         return quote(value)
     if isinstance(value, Raw):
@@ -110,16 +82,16 @@ def render(value: Any, level: int = 0) -> str:
     if isinstance(value, Call):
         return f"{value.fn}({render(value.arg, level)})"
     if isinstance(value, list | tuple):
-        return _render_list(list(value), level)
+        return render_list(list(value), level)
     if isinstance(value, dict):
-        return _render_object(value, level)
+        return render_object(value, level)
     # Anything else (dates and the like from YAML) is written as its text.
     return quote(json.dumps(value, default=str).strip('"'))
 
 
 def inline(value: Any) -> str:
-    """Render a value on one line, for use inside a larger expression (a function argument,
-    a conditional branch, a template interpolation)."""
+    """Render a value on one line, for use inside a larger expression: a function argument,
+    a conditional branch, a template interpolation."""
     if isinstance(value, Call):
         return f"{value.fn}({inline(value.arg)})"
     if isinstance(value, list | tuple):
@@ -128,7 +100,7 @@ def inline(value: Any) -> str:
         if not value:
             return "{}"
         parts = [
-            f"{_object_key(name)} = {inline(item)}"
+            f"{object_key(name)} = {inline(item)}"
             for name, item in value.items()
             if not isinstance(item, Comment)
         ]
@@ -136,26 +108,23 @@ def inline(value: Any) -> str:
     return render(value, 0)
 
 
-def _object_key(name: Any) -> str:
-    if isinstance(name, Raw):
-        return f"({name.text})"
-    return key(str(name))
-
-
-def _render_list(items: list[Any], level: int) -> str:
+def render_list(items: list[Any], level: int) -> str:
+    """A list on one line when it is short and flat, otherwise one item per line."""
     if not items:
         return "[]"
     parts = [render(item, level + 1) for item in items]
     one_line = "[" + ", ".join(parts) + "]"
-    if all("\n" not in p for p in parts) and len(one_line) + level * 2 <= _INLINE_WIDTH:
-        if all(not isinstance(item, dict | list | tuple) or not item for item in items):
-            return one_line
+    flat = all(not isinstance(item, dict | list | tuple) or not item for item in items)
+    single = all("\n" not in part for part in parts)
+    if flat and single and len(one_line) + level * 2 <= INLINE_WIDTH:
+        return one_line
     pad = INDENT * (level + 1)
     lines = ["["] + [f"{pad}{part}," for part in parts] + [INDENT * level + "]"]
     return "\n".join(lines)
 
 
-def _render_object(mapping: dict[str, Any], level: int) -> str:
+def render_object(mapping: dict[Any, Any], level: int) -> str:
+    """An object, one `key = value` per line, aligned like a body."""
     if not mapping:
         return "{}"
     items: list[Any] = []
@@ -163,59 +132,19 @@ def _render_object(mapping: dict[str, Any], level: int) -> str:
         if isinstance(value, Comment):
             items.append(value)
         else:
-            items.append(Attr(_object_key(name), value))
-    lines = ["{", *_render_items(items, level + 1), INDENT * level + "}"]
+            items.append(Attr(object_key(name), value))
+    lines = ["{"] + BodyWriter(level + 1).write(items) + [INDENT * level + "}"]
     return "\n".join(lines)
 
 
-def _render_items(items: list[Any], level: int) -> list[str]:
-    """Attributes, blocks and comments of one body, with `=` aligned like terraform fmt:
-    consecutive single-line attributes form a group; anything else ends the group."""
-    pad = INDENT * level
-    lines: list[str] = []
-    group: list[tuple[str, str]] = []
-
-    def flush() -> None:
-        if not group:
-            return
-        width = max(len(name) for name, _ in group)
-        lines.extend(f"{pad}{name.ljust(width)} = {text}" for name, text in group)
-        group.clear()
-
-    for item in items:
-        if isinstance(item, Attr):
-            name = item.name
-            text = render(item.value, level)
-            if "\n" in text:
-                flush()
-                lines.append(f"{pad}{name} = {text}")
-            else:
-                group.append((name, text))
-        elif isinstance(item, Block):
-            flush()
-            lines.extend(render_block(item, level).split("\n"))
-        elif item is BLANK:
-            flush()
-            if lines and lines[-1] != "":
-                lines.append("")
-        elif isinstance(item, Comment):
-            flush()
-            lines.extend(f"{pad}# {line}".rstrip() for line in item.text.split("\n"))
-        else:  # pragma: no cover - a programming error, not an input error
-            raise TypeError(f"Unexpected body item {item!r}")
-    flush()
-    while lines and lines[-1] == "":
-        lines.pop()
-    return lines
-
-
 def render_block(block: Block, level: int = 0) -> str:
+    """A block with its labels and body."""
     pad = INDENT * level
     labels = "".join(f" {quote(label)}" for label in block.labels)
     if not block.body:
         return f"{pad}{block.type}{labels} {{}}"
-    body = _render_items(block.body, level + 1)
-    return "\n".join([f"{pad}{block.type}{labels} {{", *body, f"{pad}}}"])
+    body = BodyWriter(level + 1).write(block.body)
+    return "\n".join([f"{pad}{block.type}{labels} {{"] + body + [f"{pad}}}"])
 
 
 def render_file(blocks: list[Block | Comment]) -> str:
@@ -233,3 +162,55 @@ def render_file(blocks: list[Block | Comment]) -> str:
             out += render_block(block)
             previous_was_comment = False
     return out + "\n"
+
+
+class BodyWriter:
+    """Writes the attributes, blocks and comments of one body, with `=` aligned the way
+    terraform fmt aligns it: consecutive single-line attributes form a group, anything else
+    ends the group."""
+
+    def __init__(self, level: int) -> None:
+        """A body at nesting depth `level`."""
+        self.level = level
+        self.pad = INDENT * level
+        self.lines: list[str] = []
+        self.group: list[tuple[str, str]] = []
+
+    def write(self, items: list[Any]) -> list[str]:
+        """The lines of the body."""
+        for item in items:
+            self.add(item)
+        self.flush()
+        while self.lines and self.lines[-1] == "":
+            self.lines.pop()
+        return self.lines
+
+    def add(self, item: Any) -> None:
+        """One item of the body."""
+        if isinstance(item, Attr):
+            text = render(item.value, self.level)
+            if "\n" in text:
+                self.flush()
+                self.lines.append(f"{self.pad}{item.name} = {text}")
+            else:
+                self.group.append((item.name, text))
+        elif isinstance(item, Block):
+            self.flush()
+            self.lines.extend(render_block(item, self.level).split("\n"))
+        elif item is BLANK:
+            self.flush()
+            if self.lines and self.lines[-1] != "":
+                self.lines.append("")
+        elif isinstance(item, Comment):
+            self.flush()
+            self.lines.extend(f"{self.pad}# {line}".rstrip() for line in item.text.split("\n"))
+        else:
+            raise TypeError(f"Unexpected body item {item!r}")
+
+    def flush(self) -> None:
+        """Write the pending group of single-line attributes, aligned on `=`."""
+        if not self.group:
+            return
+        width = max(len(name) for name, _ in self.group)
+        self.lines.extend(f"{self.pad}{name.ljust(width)} = {text}" for name, text in self.group)
+        self.group = []

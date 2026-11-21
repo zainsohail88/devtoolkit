@@ -7,7 +7,9 @@ from pathlib import Path
 
 import yaml
 
-from converters.cfn import convert_template
+from converters.cfn.convert import Converter
+from converters.cfn.parse import load_template
+from converters.cfn.pipeline import convert_template
 
 FIXTURE = Path(__file__).parent / "fixtures" / "cfn" / "storage.yaml"
 
@@ -16,8 +18,10 @@ def squeeze(text: str) -> str:
     return re.sub(r" +", " ", text)
 
 
-def convert(resources: dict, **extra) -> tuple[str, list[str]]:
-    result = convert_template(yaml.safe_dump({"Resources": resources, **extra}), stack_name="demo")
+def convert(resources: dict, extra: dict | None = None) -> tuple[str, list[str]]:
+    template = {"Resources": resources}
+    template.update(extra or {})
+    result = convert_template(yaml.safe_dump(template), stack_name="demo")
     main = next(f["content"] for f in result["files"] if f["path"] == "main.tf")
     return squeeze(main), result["notes"]
 
@@ -143,16 +147,13 @@ def test_conditional_bucket_sub_resources_share_the_condition():
                 "Properties": {"VersioningConfiguration": {"Status": "Enabled"}},
             }
         },
-        Conditions={"On": {"Fn::Equals": ["a", "a"]}},
+        {"Conditions": {"On": {"Fn::Equals": ["a", "a"]}}},
     )
     assert main.count("count = local.on ? 1 : 0") == 2
     assert "bucket = aws_s3_bucket.b[0].id" in main
 
 
 def test_cdk_auto_delete_hint_sets_force_destroy():
-    from converters.cfn.convert import Converter
-    from converters.cfn.parse import load_template
-
     template = load_template(yaml.safe_dump({"Resources": {"B": {"Type": "AWS::S3::Bucket"}}}))
     result = Converter(template, hints={"B": {"force_destroy": True}}).run("single")
     assert "force_destroy = true" in result["files"][0]["content"]
@@ -267,14 +268,20 @@ def optional(value):
     return {"Fn::If": ["On", value, NO]}
 
 
-def table(**properties) -> dict:
-    return {"Type": "AWS::DynamoDB::Table", "Properties": {**TABLE, **properties}}
+def table(properties: dict) -> dict:
+    """A table with the TABLE properties plus `properties`."""
+    merged = dict(TABLE)
+    merged.update(properties)
+    return {"Type": "AWS::DynamoDB::Table", "Properties": merged}
 
 
-def bucket_rule(**rule) -> dict:
+def bucket_rule(rule: dict) -> dict:
+    """A bucket with one enabled lifecycle rule made of `rule`."""
+    merged = {"Status": "Enabled"}
+    merged.update(rule)
     return {
         "Type": "AWS::S3::Bucket",
-        "Properties": {"LifecycleConfiguration": {"Rules": [{"Status": "Enabled", **rule}]}},
+        "Properties": {"LifecycleConfiguration": {"Rules": [merged]}},
     }
 
 
@@ -287,19 +294,28 @@ def assert_no_injection(main: str) -> None:
 def test_sse_key_that_is_not_an_arn_is_looked_up():
     main, _ = convert(
         {
-            "Alias": table(SSESpecification={"SSEEnabled": True, "KMSMasterKeyId": "alias/k"}),
+            "Alias": table({"SSESpecification": {"SSEEnabled": True, "KMSMasterKeyId": "alias/k"}}),
             "Arn": table(
-                TableName="a",
-                SSESpecification={"SSEEnabled": True, "KMSMasterKeyId": "arn:aws:kms:k"},
+                {
+                    "TableName": "a",
+                    "SSESpecification": {"SSEEnabled": True, "KMSMasterKeyId": "arn:aws:kms:k"},
+                }
             ),
             "Key": {"Type": "AWS::KMS::Key", "Properties": {}},
-            "Ref": table(TableName="r", SSESpecification={"KMSMasterKeyId": {"Ref": "Key"}}),
-            "Att": table(
-                TableName="g", SSESpecification={"KMSMasterKeyId": {"Fn::GetAtt": ["Key", "Arn"]}}
+            "Ref": table(
+                {"TableName": "r", "SSESpecification": {"KMSMasterKeyId": {"Ref": "Key"}}}
             ),
-            "Param": table(TableName="p", SSESpecification={"KMSMasterKeyId": {"Ref": "Env"}}),
+            "Att": table(
+                {
+                    "TableName": "g",
+                    "SSESpecification": {"KMSMasterKeyId": {"Fn::GetAtt": ["Key", "Arn"]}},
+                }
+            ),
+            "Param": table(
+                {"TableName": "p", "SSESpecification": {"KMSMasterKeyId": {"Ref": "Env"}}}
+            ),
         },
-        **CONDITION,
+        CONDITION,
     )
     assert "kms_key_arn = data.aws_kms_key.alias_sse_key.arn" in main
     assert 'data "aws_kms_key" "alias_sse_key" {\n key_id = "alias/k"\n}' in main
@@ -311,12 +327,12 @@ def test_sse_key_that_is_not_an_arn_is_looked_up():
 def test_sse_key_lookup_follows_the_table_condition():
     main, _ = convert(
         {
-            "T": {
-                **table(SSESpecification={"SSEEnabled": True, "KMSMasterKeyId": "k"}),
-                "Condition": "On",
-            }
+            "T": dict(
+                table({"SSESpecification": {"SSEEnabled": True, "KMSMasterKeyId": "k"}}),
+                Condition="On",
+            )
         },
-        **CONDITION,
+        CONDITION,
     )
     assert "kms_key_arn = data.aws_kms_key.t_sse_key[0].arn" in main
     assert 'data "aws_kms_key" "t_sse_key" {\n count = local.on ? 1 : 0' in main
@@ -325,19 +341,26 @@ def test_sse_key_lookup_follows_the_table_condition():
 def test_conditional_stream_and_stream_policy_is_reported():
     main, notes = convert(
         {
-            "Cond": table(StreamSpecification=optional({"StreamViewType": "KEYS_ONLY"})),
+            "Cond": table({"StreamSpecification": optional({"StreamViewType": "KEYS_ONLY"})}),
             "Policy": table(
-                TableName="p",
-                StreamSpecification={"StreamViewType": "NEW_IMAGE", "ResourcePolicy": {"P": 1}},
+                {
+                    "TableName": "p",
+                    "StreamSpecification": {
+                        "StreamViewType": "NEW_IMAGE",
+                        "ResourcePolicy": {"P": 1},
+                    },
+                }
             ),
             "Computed": table(
-                TableName="c",
-                StreamSpecification={
-                    "Fn::If": ["On", {"StreamViewType": "A"}, {"StreamViewType": "B"}]
-                },
+                {
+                    "TableName": "c",
+                    "StreamSpecification": {
+                        "Fn::If": ["On", {"StreamViewType": "A"}, {"StreamViewType": "B"}]
+                    },
+                }
             ),
         },
-        **CONDITION,
+        CONDITION,
     )
     assert "stream_enabled = local.on" in main
     assert 'stream_view_type = local.on ? "KEYS_ONLY" : null' in main
@@ -351,14 +374,16 @@ def test_contributor_insights_of_an_index_is_reported():
     main, notes = convert(
         {
             "T": table(
-                GlobalSecondaryIndexes=[
-                    {
-                        "IndexName": "g",
-                        "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
-                        "Projection": {"ProjectionType": "ALL"},
-                        "ContributorInsightsSpecification": {"Enabled": True},
-                    }
-                ]
+                {
+                    "GlobalSecondaryIndexes": [
+                        {
+                            "IndexName": "g",
+                            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "ALL"},
+                            "ContributorInsightsSpecification": {"Enabled": True},
+                        }
+                    ]
+                }
             )
         }
     )
@@ -370,26 +395,32 @@ def test_computed_table_structures_are_reported_not_guessed():
     main, notes = convert(
         {
             "T": table(
-                AttributeDefinitions=[
-                    {"AttributeName": "pk", "AttributeType": "S"},
-                    optional({"AttributeName": "gk", "AttributeType": "S"}),
-                    {"Fn::If": ["On", {"AttributeName": "a"}, {"AttributeName": "b"}]},
-                ],
-                KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}, {"Ref": "List"}],
-                ProvisionedThroughput={"Ref": "List"},
-                GlobalSecondaryIndexes=[
-                    {
-                        "IndexName": "g",
-                        "KeySchema": {"Ref": "List"},
-                        "Projection": {"Fn::If": ["On", {"ProjectionType": "ALL"}, {}]},
-                    }
-                ],
+                {
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        optional({"AttributeName": "gk", "AttributeType": "S"}),
+                        {"Fn::If": ["On", {"AttributeName": "a"}, {"AttributeName": "b"}]},
+                    ],
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}, {"Ref": "List"}],
+                    "ProvisionedThroughput": {"Ref": "List"},
+                    "GlobalSecondaryIndexes": [
+                        {
+                            "IndexName": "g",
+                            "KeySchema": {"Ref": "List"},
+                            "Projection": {"Fn::If": ["On", {"ProjectionType": "ALL"}, {}]},
+                        }
+                    ],
+                }
             ),
             "Whole": table(
-                TableName="w", AttributeDefinitions=optional([]), KeySchema={"Ref": "List"}
+                {
+                    "TableName": "w",
+                    "AttributeDefinitions": optional([]),
+                    "KeySchema": {"Ref": "List"},
+                }
             ),
         },
-        **CONDITION,
+        CONDITION,
     )
     assert 'dynamic "attribute" {\n for_each = local.on ? [1] : []' in main
     assert 'name = "gk"' in main
@@ -404,25 +435,29 @@ def test_lifecycle_rule_with_conditional_and_computed_parts():
     main, notes = convert(
         {
             "Cond": bucket_rule(
-                Transitions=[
-                    optional({"StorageClass": "GLACIER", "TransitionInDays": 30}),
-                    {"Ref": "List"},
-                ],
-                NoncurrentVersionTransitions=[
-                    optional({"StorageClass": "GLACIER", "TransitionInDays": 5})
-                ],
-                NoncurrentVersionExpiration=optional({"NoncurrentDays": 5}),
-                AbortIncompleteMultipartUpload=optional({"DaysAfterInitiation": 1}),
-                TagFilters=[{"Key": "a", "Value": "b"}, {"Ref": "List"}],
+                {
+                    "Transitions": [
+                        optional({"StorageClass": "GLACIER", "TransitionInDays": 30}),
+                        {"Ref": "List"},
+                    ],
+                    "NoncurrentVersionTransitions": [
+                        optional({"StorageClass": "GLACIER", "TransitionInDays": 5})
+                    ],
+                    "NoncurrentVersionExpiration": optional({"NoncurrentDays": 5}),
+                    "AbortIncompleteMultipartUpload": optional({"DaysAfterInitiation": 1}),
+                    "TagFilters": [{"Key": "a", "Value": "b"}, {"Ref": "List"}],
+                }
             ),
             "Computed": bucket_rule(
-                Transitions={"Ref": "List"},
-                TagFilters=optional([{"Key": "a", "Value": "b"}]),
-                NoncurrentVersionExpiration={"Ref": "List"},
-                AbortIncompleteMultipartUpload={"Ref": "List"},
+                {
+                    "Transitions": {"Ref": "List"},
+                    "TagFilters": optional([{"Key": "a", "Value": "b"}]),
+                    "NoncurrentVersionExpiration": {"Ref": "List"},
+                    "AbortIncompleteMultipartUpload": {"Ref": "List"},
+                }
             ),
         },
-        **CONDITION,
+        CONDITION,
     )
     for kind in (
         "transition",
@@ -500,7 +535,7 @@ def test_conditional_and_computed_notification_parts():
                 "Properties": {"NotificationConfiguration": {"EventBridgeConfiguration": {}}},
             },
         },
-        **CONDITION,
+        CONDITION,
     )
     assert "# Filter.S3Key.Rules was not converted" in main
     assert 'filter_suffix = ".x"' in main
@@ -536,7 +571,7 @@ def test_conditional_and_computed_ecr_lifecycle_policy():
                 "Properties": {"RepositoryName": "o", "LifecyclePolicy": {"RegistryId": "1"}},
             },
         },
-        **CONDITION,
+        CONDITION,
     )
     lifecycle = main.split('resource "aws_ecr_lifecycle_policy" "cond_lifecycle"')[1]
     assert lifecycle.startswith(" {\n count = local.on ? 1 : 0")
@@ -576,11 +611,13 @@ def test_storage_template_text_cannot_inject_hcl():
                 },
             },
             "T": table(
-                TableName=EVIL,
-                AttributeDefinitions=[{"AttributeName": EVIL, "AttributeType": EVIL}],
-                KeySchema=[{"AttributeName": EVIL, "KeyType": "HASH"}],
-                StreamSpecification={"StreamViewType": EVIL},
-                SSESpecification={"SSEEnabled": True, "KMSMasterKeyId": EVIL},
+                {
+                    "TableName": EVIL,
+                    "AttributeDefinitions": [{"AttributeName": EVIL, "AttributeType": EVIL}],
+                    "KeySchema": [{"AttributeName": EVIL, "KeyType": "HASH"}],
+                    "StreamSpecification": {"StreamViewType": EVIL},
+                    "SSESpecification": {"SSEEnabled": True, "KMSMasterKeyId": EVIL},
+                }
             ),
             "R": {
                 "Type": "AWS::ECR::Repository",

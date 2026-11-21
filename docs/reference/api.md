@@ -12,7 +12,7 @@ The `web` service calls these endpoints from the server side. In the cluster, a 
 | GET | `/ready` | Readiness probe: `{"status": "ready"}` |
 | POST | `/convert/compose-to-k8s` | Convert compose YAML, return manifests as JSON |
 | POST | `/convert/compose-to-k8s/yaml` | Same, return one multi-document YAML string |
-| POST | `/convert/compose-to-k8s/files` | Same, return files: one per resource, or a Helm chart |
+| POST | `/convert/compose-to-k8s/files` | Same, return files: one per resource or a Helm chart |
 | POST | `/convert/cfn-to-terraform` | Convert a CloudFormation, AWS SAM or AWS CDK template to Terraform files |
 | POST | `/validate/yaml` | Check YAML syntax, report line/column of errors |
 
@@ -48,7 +48,7 @@ Both convert endpoints take the same request:
 
 `/convert/compose-to-k8s/yaml` returns `"yaml": "apiVersion: v1\n..."` in place of `manifests`: every resource in apply order (Namespace, PersistentVolumeClaims, Deployments, Services), separated by `---`.
 
-`/convert/compose-to-k8s/files` takes one more field, `output`: `manifests` (default) or `helm`, and returns the result as files:
+`/convert/compose-to-k8s/files` takes one more field, `output`: `manifests` (the default) or `helm`. It returns the result as files:
 
 ```json
 {
@@ -68,7 +68,7 @@ With `output: helm` the files are `Chart.yaml`, `values.yaml` and `templates/*.y
 
 ## CloudFormation to Terraform
 
-`POST /convert/cfn-to-terraform` converts a CloudFormation template (JSON or YAML), an AWS SAM template, or the template `cdk synth` writes. See [CloudFormation to Terraform](cloudformation-to-terraform.md) for what becomes what.
+`POST /convert/cfn-to-terraform` converts a CloudFormation template (JSON or YAML), an AWS SAM template or the template `cdk synth` writes. See [CloudFormation to Terraform](cloudformation-to-terraform.md) for what becomes what.
 
 ```json
 {
@@ -106,7 +106,7 @@ With `output: helm` the files are `Chart.yaml`, `values.yaml` and `templates/*.y
 }
 ```
 
-`source` is `cloudformation`, `sam` or `cdk`. `resources` lists each resource of the template (after SAM expansion) with its Terraform address, or `null` and status `unsupported` when it could not be converted. Errors use the same shape as the other endpoints, with `line` and `column` for syntax errors. A template with a structure the converter doesn't handle gets a 400 asking for an issue, never a 500.
+`source` is `cloudformation`, `sam` or `cdk`. `resources` lists each resource of the template (after SAM expansion) with its Terraform address; a resource left as a comment has address `null` and status `unsupported`. Errors use the same shape as the other endpoints, with `line` and `column` for syntax errors. A template with a structure the converter is unable to handle gets a 400 asking for an issue.
 
 ## Validate
 
@@ -124,12 +124,12 @@ With `output: helm` the files are `Chart.yaml`, `values.yaml` and `templates/*.y
 
 | Status | When | Body |
 |--------|------|------|
-| 400 | The input can't be converted: invalid YAML or JSON, no services or resources, a wrong field type, a bad value | `{"success": false, "error": "..."}` |
-| 422 | The request itself is malformed: missing field, bad namespace or stack name, unknown option, input too long | FastAPI's standard validation error |
+| 400 | The input is unconvertible: invalid YAML or JSON, no services or resources, a wrong field type, a bad value | `{"success": false, "error": "..."}` |
+| 422 | The request itself is malformed: missing field, bad namespace or stack name, unknown option, input too long | The standard FastAPI validation error |
 
 ## Input limits
 
-Real files are far below these limits. They exist so a hostile input can't tie up the server.
+Real files are far below these limits. They cap the CPU time and memory a single request can use.
 
 | Limit | Compose and YAML check | CloudFormation | Response |
 |-------|------------------------|----------------|----------|

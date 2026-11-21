@@ -9,7 +9,9 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from main import MAX_INPUT_CHARS, app, configure_logging, resolve_log_level
+import main
+from main import app, configure_logging, resolve_log_level
+from schemas import MAX_INPUT_CHARS
 
 client = TestClient(app)
 
@@ -132,7 +134,7 @@ def test_resolve_log_level_unknown_falls_back_to_info():
 
 def test_unknown_log_level_does_not_crash_startup():
     # Importing main with a bad LOG_LEVEL used to raise "ValueError: Unknown level".
-    env = {**os.environ, "LOG_LEVEL": "verbose"}
+    env = dict(os.environ, LOG_LEVEL="verbose")
     service_dir = Path(__file__).resolve().parents[1]  # works from any working directory
     result = subprocess.run(
         [sys.executable, "-c", "import main"],
@@ -298,15 +300,14 @@ def test_cfn_to_terraform_validation(payload):
     assert client.post("/convert/cfn-to-terraform", json=payload).status_code == 422
 
 
+def broken_convert(template, provider, layout, stack_name, include_imports):
+    raise KeyError("x")
+
+
 def test_cfn_to_terraform_unexpected_shape_is_a_400(monkeypatch, caplog):
-    import main
-
-    def broken(*args, **kwargs):
-        raise KeyError("x")
-
-    monkeypatch.setattr(main, "convert_template", broken)
+    monkeypatch.setattr(main, "convert_template", broken_convert)
     with caplog.at_level("ERROR", logger="converter-api"):
         response = client.post("/convert/cfn-to-terraform", json={"template": CFN})
     assert response.status_code == 400
-    assert "can't handle yet" in response.json()["error"]
+    assert "cannot handle yet" in response.json()["error"]
     assert "unexpected template shape" in caplog.text

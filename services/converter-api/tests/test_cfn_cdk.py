@@ -5,14 +5,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from converters.cfn import convert_template
-from converters.cfn.cdk import _path_name, _references, prepare_cdk
+from converters.cfn.cdk import drop_tag, path_name, prepare_cdk, references
+from converters.cfn.pipeline import convert_template
 
 FIXTURE = Path(__file__).parent / "fixtures" / "cfn" / "cdk.json"
 
 
-def meta(path: str, **extra) -> dict:
-    return {"aws:cdk:path": path, **extra}
+def meta(path: str, extra: dict | None = None) -> dict:
+    out = {"aws:cdk:path": path}
+    out.update(extra or {})
+    return out
 
 
 def test_fixture():
@@ -36,23 +38,23 @@ def test_fixture():
 
 
 def test_path_names():
-    assert _path_name("Stack/Api/Handler/Resource") == "Api_Handler"
-    assert _path_name("Stack/Table/Default") == "Table"
-    assert _path_name("Stack/Resource") is None
-    assert _path_name("Stack/Custom::Thing/Role") == "Custom_Thing_Role"
+    assert path_name("Stack/Api/Handler/Resource") == "Api_Handler"
+    assert path_name("Stack/Table/Default") == "Table"
+    assert path_name("Stack/Resource") is None
+    assert path_name("Stack/Custom::Thing/Role") == "Custom_Thing_Role"
 
 
-def test_references():
+def testreferences():
     names = {"A"}
-    assert _references({"Ref": "A"}, names)
-    assert _references({"Fn::GetAtt": ["A", "Arn"]}, names)
-    assert _references({"Fn::GetAtt": "A.Arn"}, names)
-    assert _references({"Fn::Sub": "${A.Arn}/x"}, names)
-    assert _references({"Fn::Sub": ["${A}", {}]}, names)
-    assert not _references({"Fn::Sub": "${AB}"}, names)
-    assert not _references({"Fn::Sub": [1, {}]}, names)
-    assert _references([{"x": {"Ref": "A"}}], names)
-    assert not _references("A", names)
+    assert references({"Ref": "A"}, names)
+    assert references({"Fn::GetAtt": ["A", "Arn"]}, names)
+    assert references({"Fn::GetAtt": "A.Arn"}, names)
+    assert references({"Fn::Sub": "${A.Arn}/x"}, names)
+    assert references({"Fn::Sub": ["${A}", {}]}, names)
+    assert not references({"Fn::Sub": "${AB}"}, names)
+    assert not references({"Fn::Sub": [1, {}]}, names)
+    assert references([{"x": {"Ref": "A"}}], names)
+    assert not references("A", names)
 
 
 def test_restrict_default_security_group_and_shared_providers():
@@ -148,13 +150,11 @@ def test_auto_delete_with_an_external_bucket_and_kept_conditions():
     assert out["Parameters"] == {"Keep": {"Type": "String"}}
     assert out["Rules"] == {"Mine": {}}
     assert "Meta" not in out["Resources"] and "AutoDelete" not in out["Resources"]
-    from converters.cfn.cdk import _drop_tag
-
     resource = out["Resources"]["Tagged"]
-    _drop_tag(resource, "aws-cdk:auto-delete-objects")
+    drop_tag(resource, "aws-cdk:auto-delete-objects")
     assert resource["Properties"]["Tags"] == [{"Key": "k", "Value": "v"}]
     result = convert_template(json.dumps(template))
-    assert any("Rules were not converted" in n for n in result["notes"])
+    assert any("Rules of the template were not converted" in n for n in result["notes"])
 
 
 def test_unused_cdk_condition_is_removed_and_empty_policy_dropped():
@@ -185,7 +185,7 @@ def test_unused_cdk_condition_is_removed_and_empty_policy_dropped():
                 "Properties": {"Content": {"S3Bucket": "b", "S3Key": "k"}},
                 "Metadata": meta(
                     "S/Layer/Resource",
-                    **{"aws:asset:path": "asset.1", "aws:asset:property": "Content"},
+                    {"aws:asset:path": "asset.1", "aws:asset:property": "Content"},
                 ),
             },
             "Image": {
@@ -193,7 +193,7 @@ def test_unused_cdk_condition_is_removed_and_empty_policy_dropped():
                 "Properties": {"Code": {"ImageUri": "x"}},
                 "Metadata": meta(
                     "S/Image/Resource",
-                    **{"aws:asset:path": "asset.2", "aws:asset:property": "Code.ImageUri"},
+                    {"aws:asset:path": "asset.2", "aws:asset:property": "Code.ImageUri"},
                 ),
             },
             "Meta": {"Type": "AWS::CDK::Metadata", "Condition": "CDKMetadataAvailable"},

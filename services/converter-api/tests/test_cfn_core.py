@@ -2,25 +2,44 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 
 import pytest
 import yaml
 
-from converters.cfn import CfnError, convert_template, hcl
+from converters.cfn import hcl
 from converters.cfn.awscc import awscc_type
-from converters.cfn.context import Context, Expression
+from converters.cfn.builder import Builder, Props
+from converters.cfn.constants import MAX_TEMPLATE_CHARS
+from converters.cfn.context import Context
+from converters.cfn.convert import Converter
+from converters.cfn.errors import CfnError
+from converters.cfn.models import BLANK, Attr, Block, Call, Comment, Expression, Raw, ResourceInfo
 from converters.cfn.naming import UniqueNames, identifier, snake
-from converters.cfn.parse import MAX_TEMPLATE_CHARS, detect_source, load_template
+from converters.cfn.parse import detect_source, load_template
+from converters.cfn.pipeline import TemplateConverter, convert_template
 
 BUCKET = {"Bucket": {"Type": "AWS::S3::Bucket"}}
 
 
-def files(template: dict | str, **options) -> dict[str, str]:
+def run(template: dict | str, options: dict | None = None) -> dict:
+    """Convert a template with options given as a dict (provider, layout, stack_name,
+    include_imports)."""
     text = template if isinstance(template, str) else yaml.safe_dump(template, sort_keys=False)
-    result = convert_template(text, **options)
-    return {f["path"]: f["content"] for f in result["files"]}
+    options = options or {}
+    converter = TemplateConverter(
+        options.get("provider", "aws"),
+        options.get("layout", "files"),
+        options.get("stack_name"),
+        options.get("include_imports", False),
+    )
+    return converter.convert(text)
+
+
+def files(template: dict | str, options: dict | None = None) -> dict[str, str]:
+    return {f["path"]: f["content"] for f in run(template, options)["files"]}
 
 
 def squeeze(text: str) -> str:
@@ -28,9 +47,8 @@ def squeeze(text: str) -> str:
     return re.sub(r" +", " ", text)
 
 
-def notes(template: dict | str, **options) -> list[str]:
-    text = template if isinstance(template, str) else yaml.safe_dump(template, sort_keys=False)
-    return convert_template(text, **options)["notes"]
+def notes(template: dict | str, options: dict | None = None) -> list[str]:
+    return run(template, options)["notes"]
 
 
 def expression(value, template: dict | None = None) -> str:
@@ -231,34 +249,33 @@ def test_render_values():
     assert hcl.render(["a", 1]) == '["a", 1]'
     assert hcl.render([{"a": 1}]) == "[\n  {\n    a = 1\n  },\n]"
     assert hcl.render(["x" * 90]) == '[\n  "' + "x" * 90 + '",\n]'
-    assert hcl.render({"aws:Key": 1, "true": 2, hcl.Raw("var.k"): 3}) == (
+    assert hcl.render({"aws:Key": 1, "true": 2, Raw("var.k"): 3}) == (
         '{\n  "aws:Key" = 1\n  "true"    = 2\n  (var.k)   = 3\n}'
     )
-    import datetime
 
     assert hcl.render(datetime.date(2024, 1, 2)) == '"2024-01-02"'
 
 
 def test_inline_rendering():
-    value = hcl.Call("f", [{"a": 1, "b": hcl.Comment("x")}, {}, "s"])
+    value = Call("f", [{"a": 1, "b": Comment("x")}, {}, "s"])
     assert hcl.inline(value) == 'f([{ a = 1 }, {}, "s"])'
 
 
 def test_blocks_align_like_terraform_fmt():
-    block = hcl.Block(
+    block = Block(
         "resource",
         ["t", "n"],
         [
-            hcl.Attr("a", 1),
-            hcl.Attr("bbbb", 2),
-            hcl.Attr("obj", {"k": 1, "kkk": 2}),
-            hcl.Attr("c", 3),
-            hcl.Comment("note\nsecond line"),
-            hcl.Attr("dd", 4),
-            hcl.BLANK,
-            hcl.BLANK,
-            hcl.Block("inner", [], []),
-            hcl.BLANK,
+            Attr("a", 1),
+            Attr("bbbb", 2),
+            Attr("obj", {"k": 1, "kkk": 2}),
+            Attr("c", 3),
+            Comment("note\nsecond line"),
+            Attr("dd", 4),
+            BLANK,
+            BLANK,
+            Block("inner", [], []),
+            BLANK,
         ],
     )
     assert hcl.render_block(block) == (
@@ -280,7 +297,7 @@ def test_blocks_align_like_terraform_fmt():
 
 
 def test_render_file_keeps_comments_above_blocks():
-    text = hcl.render_file([hcl.Block("a", [], []), hcl.Comment("about b"), hcl.Block("b", [], [])])
+    text = hcl.render_file([Block("a", [], []), Comment("about b"), Block("b", [], [])])
     assert text == "a {}\n\n# about b\nb {}\n"
 
 
@@ -342,18 +359,18 @@ def test_get_att_computed_attribute_name():
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        ({"Ref": "Nope"}, "not a parameter or resource"),
+        ({"Ref": "Nope"}, "which is no parameter or resource"),
         ({"Ref": ["x"]}, "takes the name"),
         ({"Fn::GetAtt": ["Nope", "Arn"]}, "unknown resource 'Nope'"),
         ({"Fn::GetAtt": ["Bucket"]}, "takes [resource, attribute]"),
         ({"Fn::Sub": 1}, "needs a string"),
-        ({"Fn::Sub": ["a", "b"]}, "takes a string, or"),
+        ({"Fn::Sub": ["a", "b"]}, "takes a string or"),
         ({"Fn::Join": ["a"]}, "'Fn::Join' takes a list of 2"),
         ({"Fn::Select": [5, ["a"]]}, "out of range"),
         ({"Fn::If": ["Nope", 1, 2]}, "Unknown condition 'Nope'"),
         ({"Fn::FindInMap": ["Nope", "a", "b"]}, "unknown mapping 'Nope'"),
         ({"Fn::And": [{"Condition": "X"}]}, "2 to 10 conditions"),
-        ({"Fn::Cidr": ["not-a-cidr", 2, 8]}, "can't split"),
+        ({"Fn::Cidr": ["not-a-cidr", 2, 8]}, "is unable to split"),
     ],
 )
 def test_invalid_intrinsics(value, message):
@@ -433,7 +450,7 @@ def test_find_in_map_and_conditions():
     assert expression({"Fn::If": ["IsDev", 1, {"Ref": "AWS::NoValue"}]}, dict(template)) == (
         "local.is_dev ? 1 : null"
     )
-    locals_tf = squeeze(files({**template, "Resources": BUCKET})["locals.tf"])
+    locals_tf = squeeze(files(dict(template, Resources=BUCKET))["locals.tf"])
     assert 'is_dev = var.env == "dev"' in locals_tf
     assert 'is_two = tostring(var.count_) == "2"' in locals_tf
     assert 'is_num = var.env == "3"' in locals_tf
@@ -482,7 +499,7 @@ def test_expressions_nested_too_deeply():
 
 def test_expression_objects_from_the_sam_step():
     ctx = Context({"Resources": {}})
-    assert ctx.expr(Expression('file("x")')) == hcl.Raw('file("x")')
+    assert ctx.expr(Expression('file("x")')) == Raw('file("x")')
 
 
 # --- parameters -------------------------------------------------------------------------
@@ -566,7 +583,7 @@ def test_stack_name_variable_and_default():
             }
         }
     }
-    assert 'default     = "shop"' in files(template, stack_name="shop")["variables.tf"]
+    assert 'default     = "shop"' in files(template, {"stack_name": "shop"})["variables.tf"]
     assert "default" not in files(template)["variables.tf"]
     clash = dict(template, Parameters={"StackName": {"Type": "String"}})
     assert 'variable "stack_name_2"' in files(clash)["variables.tf"]
@@ -628,8 +645,8 @@ def test_unsupported_types():
     result = convert_template(yaml.safe_dump(template))
     assert result["summary"] == {"resources": 2, "aws": 0, "awscc": 0, "unsupported": 2}
     messages = "\n".join(result["notes"])
-    assert "only exists inside CloudFormation" in messages
-    assert "neither the aws mappings nor the awscc provider" in messages
+    assert "it exists inside CloudFormation only" in messages
+    assert "the aws mappings and the awscc provider both lack" in messages
     assert [r["address"] for r in result["resources"]] == [None, None]
 
 
@@ -654,7 +671,7 @@ def test_leftover_properties_are_kept_as_comments_and_noted():
 
 def test_generated_names_use_the_stack_name():
     template = {"Resources": {"T": {"Type": "AWS::DynamoDB::Table", "Properties": {}}}}
-    out = files(template, stack_name="shop")
+    out = files(template, {"stack_name": "shop"})
     assert 'name = "${var.stack_name}-T"' in out["main.tf"]
     assert any("had no TableName" in n for n in notes(template))
 
@@ -695,7 +712,7 @@ def test_awscc_conversion_follows_the_schema_index():
             },
         },
     }
-    result = convert_template(yaml.safe_dump(template), provider="awscc")
+    result = run(template, {"provider": "awscc"})
     main = result["files"][2]["content"] if len(result["files"]) > 2 else ""
     main = next(f["content"] for f in result["files"] if f["path"] == "main.tf")
     assert 'resource "awscc_lambda_function" "fn"' in main
@@ -734,7 +751,7 @@ def test_file_layouts():
     split = files(template)
     assert list(split) == ["versions.tf", "variables.tf", "locals.tf", "main.tf", "outputs.tf"]
     assert 'description = "The bucket"' in split["outputs.tf"]
-    single = files(template, layout="single")
+    single = files(template, {"layout": "single"})
     assert list(single) == ["main.tf"]
     text = single["main.tf"]
     assert text.index("terraform {") < text.index('variable "p"') < text.index("locals {")
@@ -750,12 +767,12 @@ def test_import_blocks():
             "Cc": {"Type": "AWS::Batch::JobQueue", "Properties": {"Priority": 1}},
         },
     }
-    imports = files(template, include_imports=True)["imports.tf"]
-    assert "# Adopt the resources the stack already created" in imports
+    imports = files(template, {"include_imports": True})["imports.tf"]
+    assert "# Adopt the resources the stack created" in imports
     assert 'to = aws_s3_bucket.named\n  id = "my-bucket"' in imports
     assert 'to = aws_s3_bucket.unnamed[0]\n  id = "TODO: physical ID of Unnamed"' in imports
     assert "to = awscc_batch_job_queue.cc" in imports
-    single = files(template, include_imports=True, layout="single")["main.tf"]
+    single = files(template, {"include_imports": True, "layout": "single"})["main.tf"]
     assert single.rstrip().endswith("}") and "import {" in single
 
 
@@ -790,16 +807,15 @@ def test_template_level_notes():
     assert "Top-level section 'Extra'" in messages
     assert "Transform 'AWS::SecretsManager-2020-07-23'" in messages
     assert "Transform 'AWS::Include'" in messages
-    assert "Rules were not converted" in messages
+    assert "Rules of the template were not converted" in messages
     assert "LanguageExtensions" not in messages
 
 
 def test_invalid_options():
     with pytest.raises(CfnError, match="Unknown provider"):
-        convert_template("Resources: {}", provider="google")
+        convert_template("Resources: {}", "google")
     with pytest.raises(CfnError, match="Unknown layout"):
-        convert_template("Resources: {}", layout="tree")
-    from converters.cfn.convert import Converter
+        convert_template("Resources: {}", "aws", "tree")
 
     with pytest.raises(CfnError, match="Unknown provider"):
         Converter({"Resources": {}}, provider="google")
@@ -812,7 +828,6 @@ def test_invalid_options():
 
 
 def test_awscc_renamed_types_missing_properties_and_local_code():
-    from converters.cfn.convert import Converter
 
     template = load_template(
         yaml.safe_dump(
@@ -860,11 +875,23 @@ def test_awscc_renamed_types_missing_properties_and_local_code():
     assert "the awscc provider takes Lambda code from S3 only" in messages
     assert "# DeliveryPolicy was not converted" in main
     assert "# DeletionProtectionEnabled was not converted" in main
-    assert "'Glue.FederatedCatalog.ConnectionType' is not in awscc_glue_catalog yet" in messages
+    assert (
+        "'Glue.FederatedCatalog.ConnectionType' is missing from awscc_glue_catalog in this "
+        "provider version" in messages
+    )
+
+
+def fill_a(props: Props) -> None:
+    """Copy property A to attribute a."""
+    props.attr("a", "A")
+
+
+def test_body_items_must_be_hcl_nodes():
+    with pytest.raises(TypeError, match="Unexpected body item"):
+        hcl.BodyWriter(0).write([object()])
 
 
 def test_blocks_from_computed_values():
-    from converters.cfn.builder import Props
 
     ctx = Context({"Conditions": {"C": {}}, "Resources": {}})
     ctx.conditions["C"] = "c"
@@ -880,8 +907,8 @@ def test_blocks_from_computed_values():
         "R (X)",
     )
     for name in ("Text", "Short", "Inverted", "Both"):
-        props.block(name.lower(), name, lambda p: p.attr("a", "A"))
-    rendered = hcl.render_block(hcl.Block("resource", ["x", "y"], props.items))
+        props.block(name.lower(), name, fill_a)
+    rendered = hcl.render_block(Block("resource", ["x", "y"], props.items))
     assert "# Text was not converted" in rendered
     assert "# Short was not converted" in rendered
     assert 'dynamic "inverted" {\n    for_each = !local.c ? [1] : []' in rendered
@@ -890,13 +917,12 @@ def test_blocks_from_computed_values():
 
 
 def test_json_values_and_template_parts():
-    from converters.cfn.context import json_value
 
     ctx = Context({"Resources": {}})
-    assert json_value(ctx, "not json") == "not json"
-    assert json_value(ctx, '{"a": 1}') == hcl.Call("jsonencode", {"a": 1})
-    assert json_value(ctx, {"Fn::Sub": "x"}) == "x"
-    assert json_value(ctx, [1]) == hcl.Call("jsonencode", [1])
+    assert ctx.json("not json") == "not json"
+    assert ctx.json('{"a": 1}') == Call("jsonencode", {"a": 1})
+    assert ctx.json({"Fn::Sub": "x"}) == "x"
+    assert ctx.json([1]) == Call("jsonencode", [1])
     assert (
         expression({"Fn::Join": ["", [False, {"Fn::Base64": "x"}]]})
         == '"false${base64encode("x")}"'
@@ -906,7 +932,7 @@ def test_json_values_and_template_parts():
 
 
 def test_render_comment_inside_an_object_and_mapping_tags():
-    assert hcl.render({"a": 1, "note": hcl.Comment("why")}) == "{\n  a = 1\n  # why\n}"
+    assert hcl.render({"a": 1, "note": Comment("why")}) == "{\n  a = 1\n  # why\n}"
     template = load_template(
         "Resources:\n  B:\n    Type: X\n    Properties:\n      V: !Transform {Name: M}\n"
     )
@@ -954,8 +980,6 @@ def test_lists_drop_no_value_items():
 
 
 def test_optional_items_and_literal_guard():
-    from converters.cfn.builder import Builder, Props
-    from converters.cfn.context import ResourceInfo
 
     ctx = Context({"Resources": {}})
     ctx.conditions["C"] = "c"
@@ -981,3 +1005,17 @@ def test_optional_items_and_literal_guard():
     assert hcl.inline(counted.count_items("!local.c")[0].value) == "local.c && (!local.c) ? 1 : 0"
     counted.add_resource("aws_y", "_extra", [], when="local.c")
     assert "count = local.c && (local.c) ? 1 : 0" in hcl.render_block(counted.extra[0])
+
+
+def test_awscc_if_with_wrong_arguments_is_an_error():
+    template = {
+        "Conditions": {"C": {"Fn::Equals": ["a", "b"]}},
+        "Resources": {
+            "Q": {
+                "Type": "AWS::Batch::JobQueue",
+                "Properties": {"Priority": {"Fn::If": ["C", 1]}},
+            }
+        },
+    }
+    with pytest.raises(CfnError, match="Fn::If"):
+        run(template, {"provider": "awscc"})

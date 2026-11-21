@@ -8,9 +8,9 @@ Start with the [main README](../README.md) for the quick start. Everything else 
 - [Conversion rules](reference/conversion-rules.md): how each docker-compose field maps to Kubernetes
 - [CloudFormation to Terraform](reference/cloudformation-to-terraform.md): how CloudFormation, AWS SAM and AWS CDK templates become Terraform
 
-## How it's built
+## How it is built
 
-- [Architecture](architecture.md): the two services, project layout, and how they run on Kubernetes
+- [Architecture](architecture.md): the two services, project layout and how they run on Kubernetes
 
 ## Running it
 
@@ -18,9 +18,9 @@ Start with the [main README](../README.md) for the quick start. Everything else 
 - [Deploying to your cluster](operations/deploy.md): run it on any Kubernetes cluster
 - [Configuration](configuration.md): environment variables
 
-## Where it's going
+## Where it is going
 
-- [Roadmap](roadmap.md): planned features in priority order, timeline, and what's out of scope
+- [Roadmap](roadmap.md): planned features in priority order, timeline and what is out of scope
 
 ## Contributing
 

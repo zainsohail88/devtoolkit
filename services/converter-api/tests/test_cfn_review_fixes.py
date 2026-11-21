@@ -9,10 +9,11 @@ import re
 import pytest
 import yaml
 
-from converters.cfn import CfnError, convert_template
-from converters.cfn.context import Context, json_value
+from converters.cfn.context import Context
+from converters.cfn.errors import CfnError
 from converters.cfn.naming import UniqueNames
 from converters.cfn.parse import load_template
+from converters.cfn.pipeline import convert_template
 
 BUCKET = {"Bucket": {"Type": "AWS::S3::Bucket"}}
 NO_VALUE = {"Ref": "AWS::NoValue"}
@@ -63,7 +64,7 @@ def test_names_must_be_alphanumeric(section, name):
 
 
 def test_get_att_attribute_names_are_checked():
-    with pytest.raises(CfnError, match="is not valid"):
+    with pytest.raises(CfnError, match="is invalid"):
         expression({"Fn::GetAtt": ["Bucket", 'Arn"} {"']})
 
 
@@ -102,9 +103,9 @@ def test_many_colliding_names_stay_linear():
 
 def test_json_strings_too_deep_or_recursive():
     ctx = Context({"Resources": {}})
-    assert json_value(ctx, "[" * 100_000) == "[" * 100_000
+    assert ctx.json("[" * 100_000) == "[" * 100_000
     with pytest.raises(CfnError, match="nested too deeply"):
-        json_value(ctx, "[" * 150 + "]" * 150)
+        ctx.json("[" * 150 + "]" * 150)
 
 
 # --- template strings --------------------------------------------------------------------

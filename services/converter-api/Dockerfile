@@ -25,7 +25,7 @@ RUN groupadd --system --gid 10001 app \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
-COPY --chown=app:app main.py .
+COPY --chown=app:app main.py schemas.py ./
 COPY --chown=app:app converters/ converters/
 
 USER 10001:10001
