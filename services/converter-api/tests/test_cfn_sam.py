@@ -41,7 +41,7 @@ def test_fixture_converts_to_aws_resources_only():
     result = convert_template(FIXTURE.read_text(), stack_name="demo")
     assert result["source"] == "sam"
     assert result["summary"]["awscc"] == 0 and result["summary"]["unsupported"] == 0
-    assert not [n for n in result["notes"] if "was not converted" in n]
+    assert not [n for n in result["notes"] if "was left out" in n]
 
 
 def test_function_role_and_globals():
@@ -82,7 +82,7 @@ def test_function_role_and_globals():
     role = out["Resources"]["FnRole"]["Properties"]
     assert len(role["ManagedPolicyArns"]) == 2  # basic execution + X-Ray
     assert "Globals" not in out and "Transform" not in out
-    assert "Fn: SAM property 'Unknown' was not converted" in notes
+    assert any("SAM property 'Unknown' yet" in n for n in notes)
 
 
 @pytest.mark.parametrize(
@@ -108,7 +108,7 @@ def test_code_locations(props, code, hint):
 
 def test_computed_code_uri_is_noted():
     _, _, notes = expand({"Fn": function({"CodeUri": {"Ref": "Path"}})})
-    assert any("CodeUri is computed" in n for n in notes)
+    assert any("CodeUri comes from a function" in n for n in notes)
 
 
 def test_dead_letter_queue_and_role_options():
@@ -174,8 +174,8 @@ def test_policies():
     statements = role["Policies"][1]["PolicyDocument"]["Statement"]
     assert statements[0]["Action"][0] == "dynamodb:GetItem"
     assert statements[1]["Action"] == ["cloudwatch:PutMetricData"]
-    assert any("'NoSuchTemplate' was not converted" in n for n in notes)
-    assert any("a Policies entry was not converted" in n for n in notes)
+    assert any("the SAM policy template 'NoSuchTemplate' is unknown" in n for n in notes)
+    assert any("a Policies entry has a form the converter cannot read" in n for n in notes)
 
 
 @pytest.mark.parametrize("name", PolicyTemplates().names())
@@ -325,7 +325,7 @@ def test_sns_s3_and_logs_events():
     assert resources["FnLogs"]["DependsOn"] == ["FnLogsPermission"]
     assert any("SqsSubscription" in n for n in notes)
     assert any(
-        "FnElsewhere: the bucket of the S3 event is outside this template" in n for n in notes
+        "FnElsewhere: the bucket of the S3 event lives outside this template" in n for n in notes
     )
 
 
@@ -424,9 +424,9 @@ def test_api_events_build_the_rest_api_body():
     any_arn = resources["FnAnyPermission"]["Properties"]["SourceArn"]["Fn::Sub"][0]
     assert any_arn.endswith("/*/*/all")
     assert out["Outputs"]["Stage"]["Value"] == {"Ref": "MyApiv1Stage"}
-    assert any("Auth setting of the API event was not converted" in n for n in notes)
-    assert any("MyApi: SAM API setting 'Cors'" in n for n in notes)
-    assert any("MyApi: SAM property 'Odd'" in n for n in notes)
+    assert any("Auth setting of the API event was left out" in n for n in notes)
+    assert any("MyApi: the SAM API setting 'Cors'" in n for n in notes)
+    assert any("MyApi: the converter has no mapping for the SAM property 'Odd'" in n for n in notes)
 
 
 def test_http_api_events():
@@ -498,10 +498,10 @@ def test_http_api_events():
     )
     assert resources["S3"]["Properties"]["BodyS3Location"] == {"Bucket": "b", "Key": "k"}
     assert resources["Body"]["Properties"]["Body"] == {"openapi": "3.0.1"}
-    assert any("CorsConfiguration given as a single value" in n for n in notes)
-    assert any("Http: SAM HTTP API setting 'Auth'" in n for n in notes)
-    assert any("Http: SAM property 'Odd'" in n for n in notes)
-    assert any("FnPost: the Auth setting of the API event was not converted" in n for n in notes)
+    assert any("CorsConfiguration is a single value" in n for n in notes)
+    assert any("Http: the SAM HTTP API setting 'Auth'" in n for n in notes)
+    assert any("Http: the converter has no mapping for the SAM property 'Odd'" in n for n in notes)
+    assert any("FnPost: the Auth setting of the API event was left out" in n for n in notes)
 
 
 def test_url_alias_and_unconverted_function_settings():
@@ -545,8 +545,8 @@ def test_url_alias_and_unconverted_function_settings():
         "Alias": {"Value": {"Ref": "FnAliaslive"}},
         "Version": {"Value": {"Ref": "FnVersion"}},
     }
-    assert any("the SAM setting DeploymentPreference was not converted" in n for n in notes)
-    assert any("event type 'IoTRule' was not converted" in n for n in notes)
+    assert any("the converter leaves out the SAM setting DeploymentPreference" in n for n in notes)
+    assert any("the SAM event type 'IoTRule' was left out" in n for n in notes)
 
 
 @pytest.mark.parametrize(
@@ -559,7 +559,7 @@ def test_url_alias_and_unconverted_function_settings():
 def test_invalid_sam(resources, message):
     with pytest.raises(CfnError, match=message):
         expand(resources)
-    with pytest.raises(CfnError, match="'Globals' must be a mapping"):
+    with pytest.raises(CfnError, match="'Globals' section must be a mapping"):
         expand({"Fn": function()}, {"Globals": [1]})
 
 
@@ -612,9 +612,11 @@ def test_simple_table_layer_and_other_types():
     assert resources["UriLayer"]["DeletionPolicy"] == "Retain"
     assert hints["LocalLayer"] == {"code_path": "layer"}
     assert "App" not in resources
-    assert any("App (AWS::Serverless::Application) was not converted" in n for n in notes)
-    assert any("Custom: SAM property 'Odd'" in n for n in notes)
-    assert any("UriLayer: SAM property 'Odd'" in n for n in notes)
+    assert any("App (AWS::Serverless::Application) is a SAM type" in n for n in notes)
+    assert any(
+        "Custom: the converter has no mapping for the SAM property 'Odd'" in n for n in notes
+    )
+    assert any("UriLayer: the converter has no mapping for the SAM property" in n for n in notes)
 
 
 def test_state_machines():
@@ -694,9 +696,12 @@ def test_state_machines():
     assert "FromFileRole" not in resources
     assert resources["FromS3"]["Properties"]["DefinitionS3Location"] == {"Bucket": "b", "Key": "k"}
     assert resources["FromS3"]["Properties"]["DefinitionSubstitutions"] == {"A": "b"}
-    assert any("FlowHttp: SAM state machine event type 'Api'" in n for n in notes)
-    assert any("FromFile: DefinitionSubstitutions for a definition file" in n for n in notes)
-    assert any("Flow: SAM property 'Odd'" in n for n in notes)
+    assert any("FlowHttp: the SAM state machine event type 'Api'" in n for n in notes)
+    assert any(
+        "FromFile: DefinitionSubstitutions cannot be applied to a definition file" in n
+        for n in notes
+    )
+    assert any("Flow: the converter has no mapping for the SAM property 'Odd'" in n for n in notes)
 
 
 def test_connectors():
@@ -799,12 +804,13 @@ def test_connectors():
     assert resources["RuleToFnWriteLambdaPermission"]["Properties"]["SourceArn"] == {
         "Fn::GetAtt": ["Rule", "Arn"]
     }
-    assert any("FnToMany: a connector end is outside this template" in n for n in notes)
+    assert any("FnToMany: one end of the connector lives outside this template" in n for n in notes)
     assert any(
-        "QueueToTopic: connector from AWS::SQS::Queue to AWS::SNS::Topic" in n for n in notes
+        "QueueToTopic: the connector from AWS::SQS::Queue to AWS::SNS::Topic" in n for n in notes
     )
     assert any(
-        "FnToNothing: connector from AWS::Lambda::Function to AWS::SNS::Topic" in n for n in notes
+        "FnToNothing: the connector from AWS::Lambda::Function to AWS::SNS::Topic" in n
+        for n in notes
     )
 
 

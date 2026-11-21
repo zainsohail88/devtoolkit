@@ -49,7 +49,7 @@ def convert(
 @pytest.mark.parametrize("name", ["iam", "messaging", "observability", "data"])
 def test_fixtures_convert_every_property(name):
     result = convert_template((FIXTURES / f"{name}.yaml").read_text(), stack_name="demo")
-    assert not [n for n in result["notes"] if "not converted" in n]
+    assert not [n for n in result["notes"] if "left out" in n]
     assert result["summary"]["awscc"] == 0 and result["summary"]["unsupported"] == 0
 
 
@@ -95,7 +95,7 @@ def test_role_with_inline_and_managed_policies():
     assert 'resource "aws_iam_role_policy_attachment" "role_policy_4"' in main
     assert "inline_policy" not in main and "managed_policy_arns" not in main
     assert "aws_iam_role.role.unique_id" in files["outputs.tf"]
-    assert not [n for n in notes if "not converted" in n]
+    assert not [n for n in notes if "left out" in n]
 
 
 def test_role_policies_computed_by_functions_are_reported():
@@ -113,10 +113,10 @@ def test_role_policies_computed_by_functions_are_reported():
         },
         conditions={"On": {"Fn::Equals": ["a", "a"]}},
     )
-    assert "Policies[0] was not converted" in main
-    assert "ManagedPolicyArns was not converted" in main
-    assert any("inline policy 1 is computed by a function" in n for n in notes)
-    assert any("ManagedPolicyArns is computed by a function" in n for n in notes)
+    assert "Policies[0] was left out" in main
+    assert "ManagedPolicyArns was left out" in main
+    assert any("inline policy 1 comes from a function" in n for n in notes)
+    assert any("ManagedPolicyArns comes from a function" in n for n in notes)
     assert "count = local.on ? 1 : 0" in main
 
 
@@ -158,7 +158,7 @@ def test_policy_attached_to_roles_users_and_groups():
     assert 'user = "alice"' in main
     assert 'resource "aws_iam_group_policy" "policy_aws_stack_name_admins"' in main
     assert 'resource "aws_iam_group_policy" "policy_group_5"' in main
-    assert not [n for n in notes if "not converted" in n]
+    assert not [n for n in notes if "left out" in n]
 
 
 def test_policy_type_follows_the_first_principal():
@@ -190,9 +190,9 @@ def test_policy_without_readable_principals_gets_a_variable():
     )
     assert 'resource "aws_iam_role_policy" "policy"' in main
     assert "role = var.policy_role" in main
-    assert "Roles was not converted" in main
+    assert "Roles was left out" in main
     assert 'variable "policy_role"' in files["variables.tf"]
-    assert any("lists no role, user or group" in n for n in notes)
+    assert any("names no role, user or group" in n for n in notes)
 
 
 def test_managed_policy_and_attachments():
@@ -230,7 +230,7 @@ def test_instance_profile_takes_its_one_role():
         outputs={"Arn": {"Value": {"Fn::GetAtt": ["Profile", "Arn"]}}},
     )
     assert 'role = "r"' in main
-    assert any("Two.Roles' was not converted" in n for n in notes)
+    assert any("Two.Roles' yet" in n for n in notes)
     assert "aws_iam_instance_profile.profile.arn" in files["outputs.tf"]
 
 
@@ -263,8 +263,8 @@ def test_user_and_group():
     assert 'name = "${var.stack_name}-Group"' in main
     assert 'resource "aws_iam_group_policy" "group_p"' in main
     assert 'resource "aws_iam_group_policy_attachment" "group_read_only_access"' in main
-    assert any("User.LoginProfile' was not converted" in n for n in notes)
-    assert any("Group had no GroupName" in n for n in notes)
+    assert any("User.LoginProfile' yet" in n for n in notes)
+    assert any("Group: the template leaves out GroupName" in n for n in notes)
 
 
 def squash(text: str) -> str:
@@ -314,7 +314,7 @@ def test_optional_managed_policies_and_inline_policies_are_counted():
     dev = main.split('"aws_iam_role_policy" "role_dev"')[1]
     assert dev.startswith(" {\n  count = !local.on ? 1 : 0")
     assert main.count("aws_iam_role_policy_attachment") == 2
-    assert not any("not converted" in n or "computed by a function" in n for n in notes)
+    assert not any("left out" in n or "computed by a function" in n for n in notes)
 
 
 def test_policy_with_optional_principals():

@@ -47,8 +47,8 @@ def _final_snapshot(b: Builder, identifier_prop: str) -> list[Attr]:
     base = name.lower() if isinstance(name, str) else identifier(b.logical_id).replace("_", "-")
     if b.resource.get("DeletionPolicy") is None:
         b.ctx.note(
-            f"{b.logical_id}: CloudFormation snapshots this database on delete by default; "
-            f"Terraform does the same here, naming the snapshot '{base}-final-snapshot'"
+            f"{b.logical_id}: CloudFormation snapshots this database on delete by default. "
+            f"Terraform does the same here and names the snapshot '{base}-final-snapshot'."
         )
     return [
         Attr("skip_final_snapshot", False),
@@ -60,9 +60,9 @@ def _password(b: Builder, tf_name: str) -> None:
     """MasterUserPassword as `tf_name`, with a note on where the password ends up."""
     if b.props.attr(tf_name, "MasterUserPassword"):
         b.ctx.note(
-            f"{b.logical_id}: the master password ends up in the Terraform state; prefer "
-            "manage_master_user_password = true (a Secrets Manager secret) or a write-only "
-            f"{tf_name}_wo argument"
+            f"{b.logical_id}: the master password ends up in the Terraform state. Use "
+            "manage_master_user_password = true (a Secrets Manager secret) or the write-only "
+            f"{tf_name}_wo argument instead."
         )
 
 
@@ -259,9 +259,9 @@ class DbParameterGroup(ResourceConverter):
                 p.items.append(Block("parameter", [], items))
             if parameters:
                 b.ctx.note(
-                    f"{b.logical_id}: the provider applies parameters immediately; a static "
-                    'parameter fails that way and needs apply_method = "pending-reboot" (it '
-                    "takes effect at the next reboot, as with CloudFormation)"
+                    f"{b.logical_id}: the provider applies parameters immediately, which fails "
+                    'for a static parameter. Set apply_method = "pending-reboot" on those, so '
+                    "they take effect at the next reboot as in CloudFormation."
                 )
         p.tags()
 
@@ -409,14 +409,14 @@ class SecretsManagerSecret(ResourceConverter):
                 [Attr("secret_id", b.self_ref("id")), Attr("secret_string", b.ctx.expr(value))],
             )
             b.ctx.note(
-                f"{b.logical_id}: the secret value ends up in the Terraform state; consider the "
-                "write-only secret_string_wo argument"
+                f"{b.logical_id}: the secret value ends up in the Terraform state. Consider the "
+                "write-only secret_string_wo argument instead."
             )
         if p.has("GenerateSecretString"):
             b.ctx.note(
-                f"{b.logical_id}: GenerateSecretString has no aws provider equivalent; generate "
-                "the value with an ephemeral random_password and secret_string_wo or convert "
-                "this secret with the awscc provider"
+                f"{b.logical_id}: GenerateSecretString has no aws provider equivalent. Generate "
+                "the value with an ephemeral random_password and secret_string_wo. You can also "
+                "convert this secret with the awscc provider."
             )
 
     def fill_replica(self, r: Props) -> None:

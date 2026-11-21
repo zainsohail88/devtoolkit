@@ -200,8 +200,8 @@ class CdkTemplate:
         drop_entry(self.template, "Parameters", BOOTSTRAP_PARAMETER)
         drop_entry(self.template, "Rules", BOOTSTRAP_RULE)
         self.notes.append(
-            "CDK template: CDK metadata and the bootstrap version check were left out; resource "
-            "names come from the construct paths"
+            "This is a CDK template. The converter leaves out the CDK metadata and the bootstrap "
+            "version check. Resource names come from the construct paths."
         )
 
     def replace_custom_resource(self, logical_id: str, resource: dict[str, Any]) -> None:
@@ -223,7 +223,8 @@ class CdkTemplate:
                 self.hints.setdefault(bucket_id, {})["force_destroy"] = True
                 drop_tag(self.resources[bucket_id], AUTO_DELETE_TAG)
             self.notes.append(
-                f"{logical_id} (CDK autoDeleteObjects) became force_destroy = true on the bucket"
+                f"{logical_id} (CDK autoDeleteObjects) was replaced with force_destroy = true on "
+                "the bucket."
             )
         elif kind == LOG_RETENTION:
             group = props.get("LogGroupName")
@@ -235,13 +236,14 @@ class CdkTemplate:
             }
             self.removed.discard(logical_id)
             self.notes.append(
-                f"{logical_id} (CDK logRetention) became a log group with that retention; import "
-                "the existing log group or Terraform will fail to create it"
+                f"{logical_id} (CDK logRetention) was replaced with a log group that has the same "
+                "retention. Import the existing log group first, because Terraform cannot create "
+                "one that already exists."
             )
         else:
             self.notes.append(
-                f"{logical_id} (CDK restrictDefaultSecurityGroup) was left out: add an "
-                "aws_default_security_group for the VPC with no rules to get the same effect"
+                f"{logical_id} (CDK restrictDefaultSecurityGroup) was left out. To get the same "
+                "effect, add an aws_default_security_group with no rules for the VPC."
             )
 
     def remove_unused(self) -> None:
@@ -282,8 +284,8 @@ class CdkTemplate:
                 (resource.get("Properties") or {}).pop(prop, None)
         if any("code_path" in h for h in self.hints.values()):
             self.notes.append(
-                "CDK assets: Lambda code is read from cdk.out/asset.*; run `cdk synth` and keep "
-                "cdk.out next to the Terraform files"
+                "CDK assets: the converter reads Lambda code from cdk.out/asset.*. Run `cdk "
+                "synth` and keep cdk.out next to the Terraform files."
             )
 
 

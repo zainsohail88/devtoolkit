@@ -15,4 +15,4 @@ def test_examples_are_valid_templates(name, text):
     result = convert_template(text, stack_name="demo")
     assert result["source"] == name
     assert result["summary"]["unsupported"] == 0
-    assert not [n for n in result["notes"] if "was not converted" in n]
+    assert not [n for n in result["notes"] if "left out" in n]

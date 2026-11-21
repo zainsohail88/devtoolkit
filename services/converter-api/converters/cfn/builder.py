@@ -89,10 +89,10 @@ class Props:
         if value is None or is_data:
             return value
         self.ctx.note(
-            f"{self.owner}: '{self.where}.{name}' is computed by a function and was not "
-            "converted; set it by hand"
+            f"{self.owner}: the value of '{self.where}.{name}' comes from a function, so the "
+            "converter left it out. Set it by hand."
         )
-        self.comment(f"{name} was not converted: {snippet(value)}")
+        self.comment(f"{name} was left out. CloudFormation value: {snippet(value)}")
         return None
 
     def drop(self, name: str) -> None:
@@ -197,10 +197,12 @@ class Props:
                 return
         if not isinstance(value, dict) or intrinsic_name(value) is not None:
             self.ctx.note(
-                f"{self.owner}: '{where}' is computed by a function, so it was not turned into "
-                "Terraform blocks; set it by hand"
+                f"{self.owner}: '{where}' comes from a function, so the converter cannot turn it "
+                "into Terraform blocks. Set it by hand."
             )
-            self.comment(f"{where.split('.', 1)[-1]} was not converted: {snippet(value)}")
+            self.comment(
+                f"{where.split('.', 1)[-1]} was left out. CloudFormation value: {snippet(value)}"
+            )
             return
         inner = Props(self.ctx, value, where, self.owner)
         fill(inner)
@@ -235,8 +237,11 @@ class Props:
             if value is None or self.ctx.is_no_value(value):
                 continue
             path = f"{self.where}.{name}"
-            self.ctx.note(f"{self.owner}: property '{path}' was not converted; set it by hand")
-            self.comment(f"{name} was not converted: {snippet(value)}")
+            self.ctx.note(
+                f"{self.owner}: the converter has no mapping for '{path}' yet, so it was left "
+                "out. Set it by hand if you need it."
+            )
+            self.comment(f"{name} was left out. CloudFormation value: {snippet(value)}")
         self.values.clear()
 
 
@@ -297,9 +302,9 @@ class Builder:
         suffix = self.logical_id.lower() if lowercase else self.logical_id
         self.props.set(tf_name, Raw(f'"${{var.stack_name}}-{hcl.template_text(suffix)}"'))
         self.ctx.note(
-            f"{self.logical_id} had no {cfn_name}, so CloudFormation generated one; Terraform "
-            f"needs it, so it is now '<stack_name>-{suffix}' (to adopt the existing resource, "
-            "use its current name)"
+            f"{self.logical_id}: the template leaves out {cfn_name}, so CloudFormation generated "
+            f"one. Terraform needs it, so the converter uses '<stack_name>-{suffix}'. To adopt "
+            "the existing resource, use its current name."
         )
 
     def extra_name(self, suffix: str) -> str:
