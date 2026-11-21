@@ -6,17 +6,17 @@ body:
     id: problem
     attributes:
       label: What problem would this solve?
-      description: Describe the task you're trying to do today and what makes it hard.
+      description: Describe the task you are trying to do today and what makes it hard.
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
       label: What would you like?
-      description: For a conversion rule, show an example input and the output you'd expect.
+      description: For a conversion rule, show an example input and the output you would expect.
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives you've considered
+      label: Alternatives you have considered

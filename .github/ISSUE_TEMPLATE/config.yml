@@ -2,4 +2,4 @@ blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
     url: https://github.com/zainsohail88/devtoolkit/security/advisories/new
-    about: Please report security problems privately, not as a public issue.
+    about: Report security problems privately through a GitHub security advisory.

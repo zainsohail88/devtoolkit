@@ -5,9 +5,9 @@
 | Service | What it does | Port | Reachable from |
 |---------|--------------|------|----------------|
 | `web` | Serves the pages (Docker Compose → Kubernetes, CloudFormation → Terraform, YAML validator). Calls `converter-api` from the server side. | 8080 | Users |
-| `converter-api` | The conversions, as a JSON API | 8000 | `web` only |
+| `converter-api` | Runs the conversions behind a JSON API | 8000 | `web` only |
 
-Only `web` calls `converter-api`. In the cluster a [NetworkPolicy](../k8s/converter-api/networkpolicy.yaml) admits traffic to it from `web` pods alone. That keeps input handling and output pages in one place (`web`) and leaves the API free to change.
+Only `web` calls `converter-api`. In the cluster, a [NetworkPolicy](../k8s/converter-api/networkpolicy.yaml) lets only `web` pods reach it. This way `web` is the one place that reads user input and renders pages. The API can change freely behind it.
 
 ## Project layout
 
@@ -67,7 +67,7 @@ services/
                           and dark values and the component classes. Compiled by Tailwind.
     editor/               CodeMirror 6 editor (YAML plus HCL for Terraform output):
                           src/editor.js plus pinned npm dependencies, bundled by esbuild
-    tests/                pytest tests; a fake stands in for converter-api
+    tests/                pytest tests, run against a fake converter-api
     Dockerfile            Multi-stage build: Python deps, Tailwind CLI, Node (editor), runtime
 k8s/
   namespace.yaml          devtoolkit namespace
@@ -83,7 +83,7 @@ Makefile                  Common commands (`make help`)
 .tool-versions            kind version (used by CI and checked by `make cluster-up`)
 ```
 
-Conversion logic lives in `converter-api/converters/` as classes and functions that take strings or dicts and return dicts. `converter-api/main.py` handles HTTP alone and `web` handles pages alone. That keeps the logic easy to test and ready for a future CLI.
+Conversion logic lives in `converter-api/converters/`, as classes and functions that take strings or dicts and return dicts. `converter-api/main.py` only handles HTTP and `web` only handles pages. This keeps the logic easy to test and lets a future CLI reuse it.
 
 ## How it runs on Kubernetes
 
@@ -102,17 +102,26 @@ The manifests in `k8s/` are plain YAML. Both services follow the same pattern:
 
 The `devtoolkit` namespace enforces the `restricted` [Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/), so the cluster rejects any pod that tries to run as root.
 
-The readiness probe of `web` checks `web` alone. When the API is down, the pages stay up and show an error, so each service stays in rotation on its own health.
+The readiness probe of `web` checks only `web`. When the API is down, the pages stay up and show an error. Each service stays in rotation based on its own health.
 
 ## Images
 
-Both Dockerfiles use the official slim Python image (the exact version is set in each Dockerfile and kept current by Dependabot) and run as UID 10001. Each has a Docker `HEALTHCHECK` for plain `docker run`; Kubernetes uses its own probes instead.
+Both Dockerfiles use the official slim Python image and run as UID 10001. Each Dockerfile sets the exact Python version. Dependabot keeps it current. Each image has a Docker `HEALTHCHECK` for plain `docker run`. Kubernetes uses its own probes.
 
 - `services/converter-api/Dockerfile`: **builder** installs dependencies into a virtualenv; **runtime** copies only the virtualenv and the code.
-- `services/web/Dockerfile`: the same two stages, plus a **css** stage that downloads the standalone Tailwind CLI (version and SHA-256 pinned in the Dockerfile) and compiles `styles/input.css` into one small stylesheet plus an **editor** stage that bundles the CodeMirror editor from `editor/` with esbuild (`npm ci` against the committed lockfile). The runtime image gets their output alone.
+- `services/web/Dockerfile`: the same two stages plus two more. The **css** stage downloads the standalone Tailwind CLI (version and SHA-256 pinned in the Dockerfile) and compiles `styles/input.css` into one small stylesheet. The **editor** stage bundles the CodeMirror editor from `editor/` with esbuild, after `npm ci` against the committed lockfile. The runtime image gets only their output.
+
+Images are published to GitHub Container Registry, one per service, tagged with the commit SHA and `latest`. Each image name is set once, in `k8s/<service>/deployment.yaml`. Scripts and CI read it from there. See [CI/CD](operations/ci-cd.md).
 
 ## How a page works
 
-Every page works without JavaScript: the form posts and the server renders the whole page again with the result. With JavaScript, `app.js` posts the same form with an `X-Requested-With: fetch` header. The server then returns the result fragment alone (`_result.html`, `_terraform_result.html` or `_validation.html`) and the script swaps it in place, turns the file list into tabs, mounts a read-only editor per file and marks the error line in the input editor from the `data-error-line` attribute of the fragment. The zip downloads are plain form posts to `/compose-to-k8s/zip` and `/cfn-to-terraform/zip`.
+Every page works without JavaScript: the form posts and the server renders the whole page again with the result.
 
-Images are published to GitHub Container Registry, one per service, tagged with the commit SHA and `latest`. Each image name is set once, in `k8s/<service>/deployment.yaml`; scripts and CI read it from there. See [CI/CD](operations/ci-cd.md).
+With JavaScript, `app.js` posts the same form with an `X-Requested-With: fetch` header. The server then returns only the result fragment (`_result.html`, `_terraform_result.html` or `_validation.html`). The script then:
+
+- swaps the fragment into the page
+- turns the file list into tabs
+- mounts a read-only editor for each file
+- marks the error line in the input editor, from the `data-error-line` attribute of the fragment
+
+The zip downloads are plain form posts to `/compose-to-k8s/zip` and `/cfn-to-terraform/zip`.
