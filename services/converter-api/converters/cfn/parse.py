@@ -107,7 +107,12 @@ def construct_tag(loader: yaml.SafeLoader, suffix: str, node: yaml.Node) -> dict
         return {"Condition": value}
     if suffix not in FUNCTIONS:
         mark = node.start_mark
-        raise CfnError(f"Unknown YAML tag '!{suffix}'", mark.line + 1, mark.column + 1)
+        raise CfnError(
+            f"The YAML tag '!{suffix}' is unknown. Use a CloudFormation tag such as !Ref, !Sub or "
+            "!GetAtt.",
+            mark.line + 1,
+            mark.column + 1,
+        )
     if suffix == "GetAtt" and isinstance(value, str):
         # Short form `!GetAtt Resource.Attribute.With.Dots`: the first dot splits.
         resource, _, attribute = value.partition(".")
@@ -125,7 +130,7 @@ def syntax_error(exc: yaml.YAMLError) -> CfnError:
     mark = getattr(exc, "problem_mark", None)
     line = mark.line + 1 if mark is not None else None
     column = mark.column + 1 if mark is not None else None
-    return CfnError(f"Invalid YAML: {problem}", line, column)
+    return CfnError(f"The YAML has a syntax error: {problem}. Fix it and try again.", line, column)
 
 
 # CloudFormation's rule for logical IDs, and for parameter, condition, mapping and output
@@ -142,11 +147,17 @@ def check_shape(data: Any) -> None:
         node, depth = stack.pop()
         count += 1
         if count > MAX_NODES:
-            raise CfnError(f"Template too large: more than {MAX_NODES:,} values")
+            raise CfnError(
+                f"The template has more than {MAX_NODES:,} values. Split it into smaller templates."
+            )
         if depth > MAX_DEPTH:
-            raise CfnError("Template nested too deeply")
+            raise CfnError(
+                "The template nests values too deeply. Reduce the nesting and try again."
+            )
         if isinstance(node, float) and not math.isfinite(node):
-            raise CfnError(f"Invalid number in template: {node}")
+            raise CfnError(
+                f"The number {node} in the template is infinite or undefined. Use a finite number."
+            )
         if isinstance(node, dict):
             stack.extend((k, depth + 1) for k in node)
             stack.extend((v, depth + 1) for v in node.values())
@@ -160,9 +171,12 @@ def load_template(text: str) -> dict[str, Any]:
     Raises CfnError with a message for the user.
     """
     if not text or not text.strip():
-        raise CfnError("Input is empty")
+        raise CfnError("The template is empty. Add a CloudFormation template in JSON or YAML.")
     if len(text) > MAX_TEMPLATE_CHARS:
-        raise CfnError(f"Template is longer than {MAX_TEMPLATE_CHARS:,} characters")
+        raise CfnError(
+            f"The template is longer than {MAX_TEMPLATE_CHARS:,} characters. Split it into "
+            "smaller templates."
+        )
     stripped = text.lstrip("﻿ \t\r\n")
     if stripped.startswith("{"):
         try:
@@ -170,9 +184,13 @@ def load_template(text: str) -> dict[str, Any]:
         except json.JSONDecodeError as exc:
             offset = len(text) - len(stripped)
             line = exc.lineno + text[:offset].count("\n")
-            raise CfnError(f"Invalid JSON: {exc.msg}", line, exc.colno) from exc
+            raise CfnError(
+                f"The JSON has a syntax error: {exc.msg}. Fix it and try again.", line, exc.colno
+            ) from exc
         except RecursionError as exc:
-            raise CfnError("Template nested too deeply") from exc
+            raise CfnError(
+                "The template nests values too deeply. Reduce the nesting and try again."
+            ) from exc
     else:
         try:
             check_yaml_limits(text, max_depth=MAX_DEPTH, max_nodes=MAX_NODES)
@@ -187,7 +205,11 @@ def load_template(text: str) -> dict[str, Any]:
             # check_yaml_limits raises YamlLimitError, a ValueError with a user-safe message.
             if isinstance(exc, CfnError):
                 raise
-            raise CfnError(getattr(exc, "message", "Template too large")) from exc
+            raise CfnError(
+                getattr(
+                    exc, "message", "The template is too large. Split it into smaller templates."
+                )
+            ) from exc
     check_shape(data)
     validate_template(data)
     return data
@@ -197,37 +219,43 @@ def validate_template(data: Any) -> None:
     """The structure every template needs: a mapping with a non-empty Resources mapping,
     each resource a mapping with a Type."""
     if not isinstance(data, dict):
-        raise CfnError("Invalid template: the top level must be a mapping")
+        raise CfnError(
+            "The top level of the template must be a mapping of sections, such as Resources and "
+            "Parameters."
+        )
     resources = data.get("Resources")
     if not resources:
-        raise CfnError("Invalid template: no 'Resources' defined")
+        raise CfnError("The template needs a 'Resources' section with at least one resource.")
     if not isinstance(resources, dict):
-        raise CfnError("Invalid template: 'Resources' must be a mapping")
+        raise CfnError("The 'Resources' section must be a mapping from logical IDs to resources.")
     for logical_id, resource in resources.items():
         if not isinstance(resource, dict):
-            raise CfnError(f"Invalid template: resource '{logical_id}' must be a mapping")
+            raise CfnError(f"The resource '{logical_id}' must be a mapping with at least a 'Type'.")
         kind = resource.get("Type")
         if not isinstance(kind, str) or not kind:
-            raise CfnError(f"Invalid template: resource '{logical_id}' has no 'Type'")
+            raise CfnError(f"The resource '{logical_id}' needs a 'Type', such as AWS::S3::Bucket.")
         properties = resource.get("Properties")
         if properties is not None and not isinstance(properties, dict):
-            raise CfnError(f"Invalid template: 'Properties' of '{logical_id}' must be a mapping")
+            raise CfnError(
+                f"The 'Properties' of '{logical_id}' must be a mapping from property names to "
+                "values."
+            )
     for section in ("Parameters", "Mappings", "Conditions", "Outputs"):
         value = data.get(section)
         if value is not None and not isinstance(value, dict):
-            raise CfnError(f"Invalid template: '{section}' must be a mapping")
+            raise CfnError(f"The '{section}' section must be a mapping from names to entries.")
     for name, parameter in (data.get("Parameters") or {}).items():
         if not isinstance(parameter, dict) or not isinstance(parameter.get("Type"), str):
-            raise CfnError(f"Invalid template: parameter '{name}' needs a 'Type'")
+            raise CfnError(f"The parameter '{name}' needs a 'Type', such as String or Number.")
     for name, output in (data.get("Outputs") or {}).items():
         if not isinstance(output, dict) or "Value" not in output:
-            raise CfnError(f"Invalid template: output '{name}' needs a 'Value'")
+            raise CfnError(f"The output '{name}' needs a 'Value'.")
     for section in ("Resources", "Parameters", "Conditions", "Mappings", "Outputs"):
         for name in data.get(section) or {}:
             if not isinstance(name, str) or not NAME.match(name):
                 raise CfnError(
-                    f"Invalid template: '{name}' in {section} must be letters and digits only "
-                    "(A-Z, a-z, 0-9)"
+                    f"The name '{name}' in {section} can only use letters and digits (A-Z, a-z, "
+                    "0-9). Remove other characters, such as dashes or underscores."
                 )
 
 

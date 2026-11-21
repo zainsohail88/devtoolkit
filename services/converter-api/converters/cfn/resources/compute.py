@@ -141,9 +141,9 @@ class LambdaCode:
         if source is not None:
             if re.search(r"cfn-?response", snippet_text(source)):
                 b.ctx.note(
-                    f"{b.logical_id}: the inline code uses the cfn-response module, which "
-                    "CloudFormation adds to ZipFile code; Terraform does not, so add the module "
-                    "to the archive (or send the response yourself)"
+                    f"{b.logical_id}: the inline code uses the cfn-response module, which only "
+                    "CloudFormation adds to ZipFile code. Add the module to the archive or send "
+                    "the response yourself."
                 )
             filename = self.inline_filename(original.get("Handler"), original.get("Runtime"))
             content = [Attr("content", b.ctx.expr(source)), Attr("filename", filename)]
@@ -503,14 +503,14 @@ class LambdaVersion(ResourceConverter):
             }
             b.ctx.note(
                 f"{b.logical_id} (AWS::Lambda::Version): Terraform publishes versions from the "
-                f"function itself, so {info.address} has publish = true and {b.info.address} "
-                "records its latest version"
+                f"function itself. The converter sets publish = true on {info.address}. "
+                f"{b.info.address} records its latest version."
             )
         else:
             value = {"arn": b.ctx.expr(function), "version": "$LATEST"}
             b.ctx.note(
                 f"{b.logical_id} (AWS::Lambda::Version) belongs to a function outside this "
-                "template: set publish = true on that function and use its version"
+                "template. Set publish = true on that function and use its version."
             )
         p.set("input", value)
         provisioned_concurrency(b, function, Raw(b.info.expression("output.version")))
@@ -627,8 +627,8 @@ class Ec2Instance(ResourceConverter):
                     kind = "root_block_device"
                     ebs_items(disk, with_snapshot=False)
                     b.ctx.note(
-                        f"{b.logical_id}: block device '{device}' became root_block_device; "
-                        "check that it is the root device of the AMI"
+                        f"{b.logical_id}: the converter treats block device '{device}' as "
+                        "root_block_device. Check that it is the root device of the AMI."
                     )
                 else:
                     kind = "ebs_block_device"
@@ -657,11 +657,12 @@ class Ec2Instance(ResourceConverter):
         if keep is not None and not (keep is True or str(keep).lower() == "true"):
             b.ctx.note(
                 f"{b.logical_id}: the primary network interface has DeleteOnTermination "
-                f"{snippet(keep)}, but the interface Terraform creates with the instance is "
-                "always deleted with it; to keep it, create an aws_network_interface and "
-                "attach it"
+                f"{snippet(keep)}, but Terraform always deletes the interface it creates with the "
+                "instance. To keep the interface, create an aws_network_interface and attach it."
             )
-            inner.comment(f"DeleteOnTermination was not converted: {snippet(keep)}")
+            inner.comment(
+                f"DeleteOnTermination was left out. CloudFormation value: {snippet(keep)}"
+            )
         inner.boolean("associate_public_ip_address", "AssociatePublicIpAddress")
         inner.attr("subnet_id", "SubnetId")
         inner.list_attr("vpc_security_group_ids", "GroupSet")
@@ -840,8 +841,8 @@ class ServiceConnectDefaults:
         if isinstance(value, str) and not value.startswith("arn:"):
             b.ctx.note(
                 f"{b.logical_id}: ServiceConnectDefaults.Namespace '{value}' is a namespace name, "
-                "which CloudFormation looks up (or creates); Terraform needs the namespace ARN, "
-                "e.g. from an aws_service_discovery_http_namespace"
+                "which CloudFormation looks up or creates. Terraform needs the namespace ARN, "
+                "for example from an aws_service_discovery_http_namespace."
             )
         return b.ctx.expr(value)
 

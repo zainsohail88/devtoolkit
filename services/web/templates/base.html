@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}DevToolkit{% endblock %}</title>
-  <meta name="description" content="{% block description %}Converters for infrastructure configs. Open source, nothing stored.{% endblock %}">
+  <meta name="description" content="{% block description %}Convert Docker Compose files to Kubernetes and CloudFormation templates to Terraform.{% endblock %}">
   <script>{{ theme_script|safe }}</script>
   <link rel="stylesheet" href="{{ static_url('app.css') }}">
 </head>
@@ -32,8 +32,8 @@
     {% block content %}{% endblock %}
   </main>
   <footer class="mx-auto flex max-w-measure-wide flex-wrap items-center gap-x-6 gap-y-2 px-4 py-8 text-small text-ink-muted">
-    <span>Open source, MIT licensed.</span>
-    <span>Everything is processed in memory. Nothing you paste is stored.</span>
+    <span>Open source under the MIT license.</span>
+    <span>What you paste is converted in memory and discarded right after.</span>
   </footer>
   <script src="{{ static_url('vendor/editor.js') }}"></script>
   <script src="{{ static_url('app.js') }}"></script>

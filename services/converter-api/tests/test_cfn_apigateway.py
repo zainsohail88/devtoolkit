@@ -23,7 +23,7 @@ def convert(resources: dict) -> tuple[str, list[str]]:
 def test_fixture_converts_everything():
     result = convert_template(FIXTURE.read_text(), stack_name="demo")
     assert result["summary"]["unsupported"] == 0
-    assert not [n for n in result["notes"] if "was not converted" in n]
+    assert not [n for n in result["notes"] if "was left out" in n]
     main = next(f["content"] for f in result["files"] if f["path"] == "main.tf")
     assert "redeployment = sha1(aws_api_gateway_rest_api.spec_api.body)" in main
     assert 'resource "aws_api_gateway_stage" "spec_deployment_stage"' in main
@@ -73,8 +73,8 @@ def test_rest_api_defaults_and_body_location():
     )
     assert 'name = "${var.stack_name}-Api"' in main
     assert "minimum_compression_size = data.aws_region.current.region" in main
-    assert any("Api: BodyS3Location was not converted" in n for n in notes)
-    assert any("NoBody had no Name" in n for n in notes)
+    assert any("Api: BodyS3Location was left out" in n for n in notes)
+    assert any("NoBody: the template leaves out Name" in n for n in notes)
 
 
 def test_deployment_triggers_only_for_apis_with_a_body():
@@ -94,7 +94,7 @@ def test_deployment_triggers_only_for_apis_with_a_body():
         }
     )
     assert "triggers" not in main
-    assert sum("only redeployed when its arguments change" in n for n in notes) == 3
+    assert sum("only redeploys a deployment when its arguments change" in n for n in notes) == 3
     assert 'stage_name    = "dev"' in main
 
 
@@ -113,8 +113,8 @@ def test_stage_method_settings_with_computed_path():
     )
     assert 'stage_name    = "${var.stack_name}-Stage"' in main
     assert 'method_path = "*/*"' in main
-    assert any("MethodSettings[0] uses a computed path" in n for n in notes)
-    assert any("'Stage.MethodSettings[0].Odd' was not converted" in n for n in notes)
+    assert any("MethodSettings[0] computes its path or method" in n for n in notes)
+    assert any("'Stage.MethodSettings[0].Odd' yet" in n for n in notes)
 
 
 def test_method_without_integration_and_unmatched_responses():
@@ -250,8 +250,8 @@ def test_conditional_and_computed_method_settings():
     assert "count = local.on ? 1 : 0" in main
     assert "metrics_enabled = true" in main
     assert main.count('resource "aws_api_gateway_method_settings"') == 1
-    assert main.count("# MethodSettings was not converted") == 2
-    assert len([n for n in notes if "is computed by a function" in n]) == 2
+    assert main.count("# MethodSettings was left out") == 2
+    assert len([n for n in notes if "comes from a function" in n]) == 2
 
 
 def test_conditional_and_computed_method_responses_and_integration():
@@ -298,9 +298,9 @@ def test_conditional_and_computed_method_responses_and_integration():
     only = main.split('"get_integration_response_200"')[1]
     assert only.lstrip("{\n ").startswith("count = local.on ? 1 : 0")
     assert "aws_api_gateway_method_response.get_response_500," in main
-    assert "# MethodResponses was not converted" in main
-    assert "# Integration was not converted" in main
-    assert "# Integration.IntegrationResponses was not converted" in main
+    assert "# MethodResponses was left out" in main
+    assert "# Integration was left out" in main
+    assert "# Integration.IntegrationResponses was left out" in main
     assert "computed_integration" not in main
 
 
@@ -352,11 +352,11 @@ def test_conditional_and_computed_route_parameters_and_settings():
     assert 'dynamic "request_parameter" {\n    for_each = local.on ? [1] : []' in main
     assert '"route.request.querystring.c"\n    required              = true' in main
     assert 'Fn::If"\n' not in main and 'request_parameter_key = "Fn::If"' not in main
-    assert "# RequestParameters.route.request.querystring.b was not converted" in main
-    assert "# RequestParameters was not converted" in main
+    assert "# RequestParameters.route.request.querystring.b was left out" in main
+    assert "# RequestParameters was left out" in main
     assert 'dynamic "route_settings" {\n    for_each = local.on ? [1] : []' in main
-    assert "# RouteSettings.GET /x was not converted" in main
-    assert "# RouteSettings was not converted" in main
+    assert "# RouteSettings.GET /x was left out" in main
+    assert "# RouteSettings was left out" in main
     assert 'route_key = "Fn::If"' not in main
 
 
@@ -420,4 +420,4 @@ def test_http_integration_tls_config():
         }
     )
     assert 'tls_config {\n    server_name_to_verify = "example.com"\n  }' in main
-    assert not [n for n in notes if "was not converted" in n]
+    assert not [n for n in notes if "was left out" in n]

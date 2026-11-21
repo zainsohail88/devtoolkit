@@ -1,15 +1,17 @@
 # DevToolkit
 
-Practical DevOps conversion tools, built as microservices on Kubernetes.
+DevToolkit converts infrastructure code from one tool to another. It runs as two small services on Kubernetes.
 
-**Try it:** [devtoolkit.cloud.run](https://devtoolkit.cloud.run)
+**Hosted version:** [devtoolkit.cloud.run](https://devtoolkit.cloud.run)
 
-DevToolkit has two jobs:
+DevToolkit has two converters. Each one has a web page and an API endpoint:
 
-1. **Be useful.** Two converters, each with a web page and an API: Docker Compose to Kubernetes, CloudFormation (with AWS SAM and AWS CDK) to Terraform.
-2. **Be a clean example.** Plain Kubernetes manifests, health probes, resource limits, non-root containers, a NetworkPolicy and a full CI/CD pipeline, all small enough to read in one sitting.
+- Docker Compose to Kubernetes
+- CloudFormation, AWS SAM and AWS CDK to Terraform
 
-It is two services: **web** serves the pages you use in a browser and **converter-api** does the conversions. Only web can reach the API.
+The project also shows how to run a small service on Kubernetes. It uses plain manifests, health probes, resource limits, non-root containers, a NetworkPolicy and a full CI/CD pipeline. All of it is small enough to read in one sitting.
+
+The **web** service serves the pages and **converter-api** does the conversions. Only web can call the API.
 
 ## Quick start
 
@@ -19,17 +21,17 @@ It is two services: **web** serves the pages you use in a browser and **converte
 |------|-----------------|------------|
 | [Python](https://www.python.org/) | 3.13 | Dev Mode |
 | [GNU Make](https://www.gnu.org/software/make/) | 3.81 | Dev Mode, Kubernetes Mode |
-| [curl](https://curl.se/) | Any current release | Dev Mode (downloads the Tailwind CLI once, for the stylesheet of the web UI) |
-| [Node.js](https://nodejs.org/) | 22 | Dev Mode (bundles the code editor of the web UI once, `make editor`) |
-| [Docker](https://docs.docker.com/get-docker/) | Any current release | Kubernetes Mode (builds the images; kind runs on it) |
+| [curl](https://curl.se/) | Any current release | Dev Mode: downloads the Tailwind CLI once to build the web UI stylesheet |
+| [Node.js](https://nodejs.org/) | 22 | Dev Mode: `make editor` bundles the code editor of the web UI once |
+| [Docker](https://docs.docker.com/get-docker/) | Any current release | Kubernetes Mode: builds the images and runs kind |
 | [kind](https://kind.sigs.k8s.io/) | v0.33.0 (pinned in [`.tool-versions`](.tool-versions)) | Kubernetes Mode |
-| [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.36 (cluster runs Kubernetes 1.37) | Kubernetes Mode |
-| [jq](https://jqlang.org/) | 1.5 | Only the [example](#example) below |
-| [Terraform](https://developer.hashicorp.com/terraform/install) | 1.5 | Only `make validate-terraform`, which checks the output of the CloudFormation converter |
+| [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.36 (the cluster runs Kubernetes 1.37) | Kubernetes Mode |
+| [jq](https://jqlang.org/) | 1.5 | The [example](#example) below |
+| [Terraform](https://developer.hashicorp.com/terraform/install) | 1.5 | `make validate-terraform`, which checks the Terraform that the CloudFormation converter writes |
 
 #### Dev Mode
 
-Runs both services directly with Python and reloads on every code change.
+Dev Mode runs both services with Python and reloads them when you change the code.
 
 ```bash
 make install                 # create .venv and install dependencies for every service
@@ -40,7 +42,7 @@ make run-web                 # in a second terminal: start the web UI on http://
 
 #### Kubernetes Mode
 
-Builds both images and runs them on a local kind cluster, using the same manifests as production.
+Kubernetes Mode builds both images and runs them on a local kind cluster with the same manifests as production.
 
 ```bash
 make deploy-local            # create the kind cluster if needed, build the images, deploy k8s/
@@ -57,7 +59,7 @@ make help                    # list every make target with a short description
 
 ## Example
 
-Send a Docker Compose file and get back Kubernetes Deployments and Services, plus notes on anything that needs a human decision. The web UI does the same from a form. With the API running (`make run`):
+Post a Docker Compose file to the API and you get back Kubernetes Deployments and Services. The response also lists notes on anything you need to decide yourself. The web UI does the same through a form. Start the API with `make run`, then run:
 
 ```bash
 curl -s localhost:8000/convert/compose-to-k8s/yaml \
@@ -83,7 +85,7 @@ kind: Service
     protocol: TCP
 ```
 
-A CloudFormation template works the same way, with `/convert/cfn-to-terraform`:
+To convert a CloudFormation template, post it to `/convert/cfn-to-terraform`:
 
 ```bash
 curl -s localhost:8000/convert/cfn-to-terraform \
@@ -107,11 +109,11 @@ resource "aws_s3_bucket_versioning" "logs_versioning" {
 
 | Topic | |
 |-------|-|
-| [API reference](docs/reference/api.md) | Endpoints, requests, responses, errors, input limits |
-| [Conversion rules](docs/reference/conversion-rules.md) | How each compose field maps to Kubernetes |
-| [CloudFormation to Terraform](docs/reference/cloudformation-to-terraform.md) | How CloudFormation, SAM and CDK templates become Terraform |
-| [Architecture](docs/architecture.md) | Project layout, the two services, how they run on Kubernetes |
-| [CI/CD](docs/operations/ci-cd.md) | Workflows, image publishing, security scanning |
-| [Deploying to your cluster](docs/operations/deploy.md) | Run it on any Kubernetes cluster |
+| [API reference](docs/reference/api.md) | Endpoints, requests, responses, errors and input limits |
+| [Conversion rules](docs/reference/conversion-rules.md) | How each Compose field maps to Kubernetes |
+| [CloudFormation to Terraform](docs/reference/cloudformation-to-terraform.md) | How CloudFormation, SAM and CDK templates convert to Terraform |
+| [Architecture](docs/architecture.md) | The project layout, the two services and how they run on Kubernetes |
+| [CI/CD](docs/operations/ci-cd.md) | Workflows, image publishing and security scanning |
+| [Deploying to your cluster](docs/operations/deploy.md) | How to run DevToolkit on your own Kubernetes cluster |
 | [Configuration](docs/configuration.md) | Environment variables |
-| [Roadmap](docs/roadmap.md) | Planned features in priority order, timeline, out of scope |
+| [Roadmap](docs/roadmap.md) | Planned features in priority order, the timeline and what is out of scope |

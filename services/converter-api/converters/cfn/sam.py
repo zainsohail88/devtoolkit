@@ -217,7 +217,9 @@ class Expansion:
         self.aliases: dict[str, str] = {}
         self.globals = template.get("Globals") or {}
         if not isinstance(self.globals, dict):
-            raise CfnError("Invalid SAM template: 'Globals' must be a mapping")
+            raise CfnError(
+                "The SAM 'Globals' section must be a mapping from resource types to settings."
+            )
 
     def note(self, message: str) -> None:
         """Add a note once."""
@@ -227,7 +229,10 @@ class Expansion:
     def leftovers(self, logical_id: str, props: dict[str, Any]) -> None:
         """A note for each SAM property nothing used."""
         for name in props:
-            self.note(f"{logical_id}: SAM property '{name}' was not converted")
+            self.note(
+                f"{logical_id}: the converter has no mapping for the SAM property '{name}' yet, "
+                "so it was left out. Set it by hand if you need it."
+            )
 
     def add(
         self,
@@ -272,8 +277,8 @@ class IamWriter:
         template = self.templates.get(name)
         if template is None:
             self.exp.note(
-                f"{owner}: SAM policy template '{name}' was not converted; add its "
-                f"permissions to {role_id} by hand"
+                f"{owner}: the SAM policy template '{name}' is unknown to the converter, so it "
+                f"was left out. Add its permissions to {role_id} by hand."
             )
             return []
         return template(params if isinstance(params, dict) else {})
@@ -306,7 +311,10 @@ class IamWriter:
                 ((name, params),) = policy.items()
                 statements.extend(self.policy_template(owner, role_id, name, params))
             else:
-                self.exp.note(f"{owner}: a Policies entry was not converted; add it to {role_id}")
+                self.exp.note(
+                    f"{owner}: a Policies entry has a form the converter cannot read, so it was "
+                    f"left out. Add it to {role_id} by hand."
+                )
         if statements:
             inline.append(inline_policy(f"{role_id}PolicyTemplates", statements))
         role: dict[str, Any] = {
@@ -484,8 +492,8 @@ class FunctionExpander:
             fn["Role"] = role
             if policies:
                 self.exp.note(
-                    f"{logical_id} sets both Role and Policies: SAM ignores Policies then, so "
-                    "they were not converted"
+                    f"{logical_id} sets both Role and Policies. SAM ignores Policies in that "
+                    "case, so the converter leaves them out too."
                 )
         self.exp.add(logical_id, "AWS::Lambda::Function", fn, resource, meta(resource))
 
@@ -493,12 +501,14 @@ class FunctionExpander:
         if alias is not None:
             target = self.alias(logical_id, alias, resource)
         if not isinstance(events, dict):
-            raise CfnError(f"Invalid SAM template: 'Events' of '{logical_id}' must be a mapping")
+            raise CfnError(
+                f"The 'Events' of '{logical_id}' must be a mapping from event names to events."
+            )
         for event_name, event in events.items():
             if not isinstance(event, dict):
                 raise CfnError(
-                    f"Invalid SAM template: event '{event_name}' of '{logical_id}' must be a "
-                    "mapping"
+                    f"The event '{event_name}' of '{logical_id}' must be a mapping with a Type "
+                    "and Properties."
                 )
             managed.extend(self.event(f"{logical_id}{event_name}", event, target, resource))
         if isinstance(url, dict):
@@ -521,7 +531,8 @@ class FunctionExpander:
         for name in ("DeploymentPreference", "ProvisionedConcurrencyConfig", "EventInvokeConfig"):
             if p.pop(name, None) is not None:
                 self.exp.note(
-                    f"{logical_id}: the SAM setting {name} was not converted; set it up by hand"
+                    f"{logical_id}: the converter leaves out the SAM setting {name}. Set it up by "
+                    "hand."
                 )
         p.pop("Metadata", None)
         self.exp.leftovers(logical_id, p)
@@ -546,7 +557,10 @@ class FunctionExpander:
         elif isinstance(code, str):
             self.exp.hints.setdefault(logical_id, {})["code_path"] = local_path(code)
         elif code is not None:
-            self.exp.note(f"{logical_id}: CodeUri is computed by a function and was not converted")
+            self.exp.note(
+                f"{logical_id}: CodeUri comes from a function, so the converter left it out. Set "
+                "the function code by hand."
+            )
 
     def alias(self, logical_id: str, alias: Any, origin: dict[str, Any]) -> dict[str, Any]:
         """The version and alias of AutoPublishAlias. Returns a Ref to the alias."""
@@ -638,8 +652,8 @@ class FunctionExpander:
             self.api_event(event_id, props, target, origin, http=True)
         else:
             self.exp.note(
-                f"{event_id}: SAM event type '{kind}' was not converted; connect the event "
-                "source by hand"
+                f"{event_id}: the SAM event type '{kind}' was left out. Connect the event source "
+                "to the function by hand."
             )
         return []
 
@@ -676,8 +690,8 @@ class FunctionExpander:
                 subscription[name] = props[name]
         if props.get("SqsSubscription"):
             self.exp.note(
-                f"{event_id}: the SqsSubscription of the SNS event (a queue between the topic "
-                "and the function) was not converted"
+                f"{event_id}: the SqsSubscription of the SNS event was left out. Add the queue "
+                "between the topic and the function by hand."
             )
         self.exp.add(event_id, "AWS::SNS::Subscription", subscription, origin)
         self.iam.permission(
@@ -695,8 +709,8 @@ class FunctionExpander:
         bucket = self.exp.source.get(bucket_id or "")
         if bucket is None or bucket.get("Type") != "AWS::S3::Bucket":
             self.exp.note(
-                f"{event_id}: the bucket of the S3 event is outside this template; add the "
-                "notification to that bucket by hand"
+                f"{event_id}: the bucket of the S3 event lives outside this template. Add the "
+                "notification to that bucket by hand."
             )
             return
         config: dict[str, Any] = {"Function": target}
@@ -739,8 +753,8 @@ class FunctionExpander:
             }
         if props.get("Auth"):
             self.exp.note(
-                f"{event_id}: the Auth setting of the API event was not converted; add the "
-                "authorizer"
+                f"{event_id}: the Auth setting of the API event was left out. Add the authorizer "
+                "by hand."
             )
         if http and path == "$default":
             scope = "*"
@@ -853,8 +867,8 @@ class ApiExpander:
         ):
             if p.pop(name, None) is not None:
                 self.exp.note(
-                    f"{logical_id}: SAM API setting '{name}' was not converted; add it to the "
-                    "API definition by hand"
+                    f"{logical_id}: the SAM API setting '{name}' was left out. Add it to the API "
+                    "definition by hand."
                 )
         self.exp.leftovers(logical_id, p)
 
@@ -877,7 +891,8 @@ class ApiExpander:
             api["CorsConfiguration"] = cors
         elif cors is not None:
             self.exp.note(
-                f"{logical_id}: CorsConfiguration given as a single value was not converted"
+                f"{logical_id}: CorsConfiguration is a single value, so it was left out. Write it "
+                "as a mapping or set up CORS by hand."
             )
         for name in ("Description", "DisableExecuteApiEndpoint", "FailOnWarnings"):
             if name in p:
@@ -909,8 +924,8 @@ class ApiExpander:
         for name in ("Auth", "Domain"):
             if p.pop(name, None) is not None:
                 self.exp.note(
-                    f"{logical_id}: SAM HTTP API setting '{name}' was not converted; set it up "
-                    "by hand"
+                    f"{logical_id}: the SAM HTTP API setting '{name}' was left out. Set it up by "
+                    "hand."
                 )
         self.exp.leftovers(logical_id, p)
 
@@ -1000,8 +1015,8 @@ class StateMachineExpander:
             machine["Definition"] = file_body(uri)
             if substitutions:
                 self.exp.note(
-                    f"{logical_id}: DefinitionSubstitutions for a definition file were not "
-                    "applied; use templatefile() in place of file()"
+                    f"{logical_id}: DefinitionSubstitutions cannot be applied to a definition "
+                    "file, so they were left out. Use templatefile() in place of file()."
                 )
         elif uri is not None:
             machine["DefinitionS3Location"] = s3_location(uri)
@@ -1067,7 +1082,10 @@ class StateMachineExpander:
                 event_id, props, {"Ref": logical_id}, "states:StartExecution", resource
             )
         else:
-            self.exp.note(f"{event_id}: SAM state machine event type '{kind}' was not converted")
+            self.exp.note(
+                f"{event_id}: the SAM state machine event type '{kind}' was left out. Connect the "
+                "event source by hand."
+            )
 
 
 # --- connectors -------------------------------------------------------------------------
@@ -1093,8 +1111,8 @@ class ConnectorExpander:
             name = f"{logical_id}PolicyDestination{index}" if len(destinations) > 1 else None
             if source_id not in self.exp.source or destination_id not in self.exp.source:
                 self.exp.note(
-                    f"{logical_id}: a connector end is outside this template; the connector "
-                    "was not converted"
+                    f"{logical_id}: one end of the connector lives outside this template, so the "
+                    "connector was left out. Grant the access by hand."
                 )
                 continue
             self.connect(logical_id, source_id, destination_id or "", permissions, name)
@@ -1126,8 +1144,8 @@ class ConnectorExpander:
         actions = [a for p in permissions for a in (actions_by_permission or {}).get(str(p), [])]
         if role is None or not actions:
             self.exp.note(
-                f"{logical_id}: connector from {source_type} to {destination_type} was not "
-                "converted; grant the access by hand"
+                f"{logical_id}: the connector from {source_type} to {destination_type} was left "
+                "out. Grant the access by hand."
             )
             return
         if destination_type in REF_IS_ARN:
@@ -1229,8 +1247,8 @@ class SamExpander:
                 connectors.append((logical_id, resource.get("Properties") or {}, None))
             elif kind.startswith("AWS::Serverless::"):
                 self.exp.note(
-                    f"{logical_id} ({kind}) was not converted: Terraform has no equivalent; "
-                    "convert it by hand"
+                    f"{logical_id} ({kind}) is a SAM type the converter cannot expand yet, so it "
+                    "was left out. Convert it by hand."
                 )
             else:
                 self.exp.out[logical_id] = resource

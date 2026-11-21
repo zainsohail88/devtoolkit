@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block title %}YAML check · DevToolkit{% endblock %}
-{% block description %}Check YAML syntax. The first error is marked at its exact line and column.{% endblock %}
+{% block description %}Check a YAML file for syntax errors and see exactly where the first one is.{% endblock %}
 {% block content %}
 <h1 class="text-step-2 font-semibold">YAML check</h1>
-<p class="mt-1 max-w-measure text-ink-muted">Syntax only. The first error is marked at its line and column. Multi-document files (separated by <code class="font-mono">---</code>) are supported.</p>
+<p class="mt-1 max-w-measure text-ink-muted">Paste YAML to check its syntax. When something is wrong, the editor highlights the first error at its line and column. Files with several documents separated by <code class="font-mono">---</code> work too.</p>
 
 <form method="post" action="/validate-yaml" enctype="multipart/form-data" class="mt-6 grid gap-3" data-tool-form data-result-target="#result">
   <div class="flex flex-wrap items-center justify-between gap-2">
@@ -17,7 +17,7 @@
   </div>
   <div class="flex flex-wrap items-center gap-4">
     <button type="submit" class="btn btn-primary" data-submit>{% include "icons/check.svg" %} Check</button>
-    <p class="text-small text-ink-muted">Drop a file onto the editor or press <kbd class="rounded-sm border border-hairline px-1 font-mono">Ctrl</kbd>+<kbd class="rounded-sm border border-hairline px-1 font-mono">Enter</kbd>.</p>
+    <p class="text-small text-ink-muted">Drop a file onto the editor or press <kbd class="rounded-sm border border-hairline px-1 font-mono">Ctrl</kbd>+<kbd class="rounded-sm border border-hairline px-1 font-mono">Enter</kbd> to check.</p>
   </div>
   <div id="result" aria-live="polite">
     {% include "_validation.html" %}

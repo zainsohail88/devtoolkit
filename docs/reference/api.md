@@ -1,8 +1,8 @@
 # API reference
 
-While the service is running, interactive docs (Swagger UI) are served at `/docs`, e.g. http://localhost:8000/docs.
+While the service runs, it serves interactive docs (Swagger UI) at `/docs`, for example http://localhost:8000/docs.
 
-The `web` service calls these endpoints from the server side. In the cluster, a NetworkPolicy allows only `web` pods to reach the API; in the hosted version, the API requires authentication and only `web` is allowed to call it. To use the API directly, run it yourself (`make run`).
+The `web` service calls these endpoints from its server. In the cluster, a NetworkPolicy lets only `web` pods reach the API. In the hosted version, the API requires authentication and only `web` may call it. To call the API yourself, run it locally with `make run`.
 
 ## Endpoints
 
@@ -10,15 +10,15 @@ The `web` service calls these endpoints from the server side. In the cluster, a 
 |--------|------|--------------|
 | GET | `/health` | Liveness probe: `{"status": "healthy"}` |
 | GET | `/ready` | Readiness probe: `{"status": "ready"}` |
-| POST | `/convert/compose-to-k8s` | Convert compose YAML, return manifests as JSON |
-| POST | `/convert/compose-to-k8s/yaml` | Same, return one multi-document YAML string |
-| POST | `/convert/compose-to-k8s/files` | Same, return files: one per resource or a Helm chart |
-| POST | `/convert/cfn-to-terraform` | Convert a CloudFormation, AWS SAM or AWS CDK template to Terraform files |
-| POST | `/validate/yaml` | Check YAML syntax, report line/column of errors |
+| POST | `/convert/compose-to-k8s` | Converts Compose YAML and returns the manifests as JSON |
+| POST | `/convert/compose-to-k8s/yaml` | The same conversion, returned as one multi-document YAML string |
+| POST | `/convert/compose-to-k8s/files` | The same conversion, returned as files: one per resource or a Helm chart |
+| POST | `/convert/cfn-to-terraform` | Converts a CloudFormation, AWS SAM or AWS CDK template to Terraform files |
+| POST | `/validate/yaml` | Checks YAML syntax and reports the line and column of an error |
 
 ## Convert
 
-Both convert endpoints take the same request:
+The three `compose-to-k8s` endpoints take the same request:
 
 ```json
 {
@@ -30,9 +30,9 @@ Both convert endpoints take the same request:
 
 | Field | Required | Default | Notes |
 |-------|----------|---------|-------|
-| `compose_yaml` | yes | | The docker-compose file as a string |
+| `compose_yaml` | yes | | The Docker Compose file as a string |
 | `namespace` | no | `default` | Must be a valid Kubernetes namespace name |
-| `include_service` | no | `true` | `false` skips generating Services |
+| `include_service` | no | `true` | `false` leaves out the Services |
 
 **Success** (HTTP 200), from `/convert/compose-to-k8s`:
 
@@ -44,11 +44,11 @@ Both convert endpoints take the same request:
 }
 ```
 
-`manifests` has four lists, each possibly empty: `namespaces`, `persistent_volume_claims`, `deployments`, `services`.
+`manifests` has four lists, any of which can be empty: `namespaces`, `persistent_volume_claims`, `deployments` and `services`.
 
-`/convert/compose-to-k8s/yaml` returns `"yaml": "apiVersion: v1\n..."` in place of `manifests`: every resource in apply order (Namespace, PersistentVolumeClaims, Deployments, Services), separated by `---`.
+`/convert/compose-to-k8s/yaml` returns `"yaml": "apiVersion: v1\n..."` instead of `manifests`. The string holds every resource in apply order (Namespace, PersistentVolumeClaims, Deployments, Services), separated by `---`.
 
-`/convert/compose-to-k8s/files` takes one more field, `output`: `manifests` (the default) or `helm`. It returns the result as files:
+`/convert/compose-to-k8s/files` takes one more field, `output`, set to `manifests` (the default) or `helm`. It returns the result as files:
 
 ```json
 {
@@ -62,13 +62,13 @@ Both convert endpoints take the same request:
 }
 ```
 
-With `output: helm` the files are `Chart.yaml`, `values.yaml` and `templates/*.yaml`. An unknown `output` is a 422.
+With `output: helm`, the files are `Chart.yaml`, `values.yaml` and `templates/*.yaml`. An unknown `output` value returns a 422.
 
-`notes` lists anything that needs a human decision. See [conversion rules](conversion-rules.md).
+`notes` lists anything you need to decide or fix yourself. See [conversion rules](conversion-rules.md).
 
 ## CloudFormation to Terraform
 
-`POST /convert/cfn-to-terraform` converts a CloudFormation template (JSON or YAML), an AWS SAM template or the template `cdk synth` writes. See [CloudFormation to Terraform](cloudformation-to-terraform.md) for what becomes what.
+`POST /convert/cfn-to-terraform` converts a CloudFormation template (JSON or YAML), an AWS SAM template or the template that `cdk synth` writes. [CloudFormation to Terraform](cloudformation-to-terraform.md) explains how each part converts.
 
 ```json
 {
@@ -83,10 +83,10 @@ With `output: helm` the files are `Chart.yaml`, `values.yaml` and `templates/*.y
 | Field | Required | Default | Notes |
 |-------|----------|---------|-------|
 | `template` | yes | | The template as a string, at most 500,000 characters |
-| `provider` | no | `aws` | `aws`: hand-written `aws` provider mappings, `awscc` for other types. `awscc`: every resource with `awscc` |
+| `provider` | no | `aws` | `aws`: hand-written `aws` provider mappings, with `awscc` for the other types. `awscc`: `awscc` for every resource |
 | `layout` | no | `files` | `files`: `versions.tf`, `variables.tf`, `locals.tf`, `main.tf`, `outputs.tf`. `single`: everything in `main.tf` |
-| `stack_name` | no | | Default for `var.stack_name`, which replaces `AWS::StackName`. A letter, then letters, digits and `-` |
-| `include_imports` | no | `false` | Also write `imports.tf`, to adopt the resources an existing stack created |
+| `stack_name` | no | | `AWS::StackName` converts to `var.stack_name` and this field sets its default. It starts with a letter, followed by letters, digits and `-`, up to 128 characters |
+| `include_imports` | no | `false` | Also writes `imports.tf`, so Terraform can adopt the resources that an existing stack created |
 
 **Success** (HTTP 200):
 
@@ -106,11 +106,13 @@ With `output: helm` the files are `Chart.yaml`, `values.yaml` and `templates/*.y
 }
 ```
 
-`source` is `cloudformation`, `sam` or `cdk`. `resources` lists each resource of the template (after SAM expansion) with its Terraform address; a resource left as a comment has address `null` and status `unsupported`. Errors use the same shape as the other endpoints, with `line` and `column` for syntax errors. A template with a structure the converter is unable to handle gets a 400 asking for an issue.
+`source` is `cloudformation`, `sam` or `cdk`. `resources` lists each resource of the template after SAM expansion, with its Terraform address. A resource kept as a comment has the address `null` and the status `unsupported`.
+
+Errors have the same shape as for the other endpoints, with `line` and `column` for syntax errors. If the converter cannot handle the structure of a template, it returns a 400 that asks you to open an issue.
 
 ## Validate
 
-`POST /validate/yaml` takes `{"yaml": "..."}`. Multi-document input (separated by `---`) is supported.
+`POST /validate/yaml` takes `{"yaml": "..."}`. It accepts several documents separated by `---`.
 
 ```json
 {"valid": true, "documents": 2}
@@ -124,12 +126,12 @@ With `output: helm` the files are `Chart.yaml`, `values.yaml` and `templates/*.y
 
 | Status | When | Body |
 |--------|------|------|
-| 400 | The input is unconvertible: invalid YAML or JSON, no services or resources, a wrong field type, a bad value | `{"success": false, "error": "..."}` |
-| 422 | The request itself is malformed: missing field, bad namespace or stack name, unknown option, input too long | The standard FastAPI validation error |
+| 400 | The input cannot be converted: invalid YAML or JSON, a file without services or resources, a wrong field type or a bad value | `{"success": false, "error": "..."}` |
+| 422 | The request itself is malformed: a missing field, a bad namespace or stack name, an unknown option or input that is too long | The standard FastAPI validation error |
 
 ## Input limits
 
-Real files are far below these limits. They cap the CPU time and memory a single request can use.
+These limits cap the CPU time and memory that one request can use. Real files stay far below them.
 
 | Limit | Compose and YAML check | CloudFormation | Response |
 |-------|------------------------|----------------|----------|

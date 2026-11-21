@@ -1,23 +1,23 @@
 name: Bug report
-description: Something converts wrongly, crashes or doesn't work as documented
+description: Something converts wrongly, crashes or works differently from the docs
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        Found a security problem? Please **don't** file it here. See [SECURITY.md](https://github.com/zainsohail88/devtoolkit/blob/main/SECURITY.md).
+        Found a security problem? Please report it privately as described in [SECURITY.md](https://github.com/zainsohail88/devtoolkit/blob/main/SECURITY.md).
   - type: textarea
     id: what-happened
     attributes:
       label: What happened?
-      description: What did you expect, and what did you get instead?
+      description: What did you expect and what did you get instead?
     validations:
       required: true
   - type: textarea
     id: input
     attributes:
       label: Input
-      description: The compose file or request body that shows the problem. Remove anything private first.
+      description: The compose file, template or request body that shows the problem. Remove anything private first.
       render: yaml
     validations:
       required: true

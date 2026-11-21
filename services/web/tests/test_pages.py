@@ -86,7 +86,7 @@ def test_probes(client):
 def test_index_names_the_product_and_lists_the_tools(client):
     html = client.get("/").text
     assert "<h1" in html and ">DevToolkit</h1>" in html
-    assert "Converters for infrastructure configs. Open source, nothing stored." in html
+    assert "Move infrastructure code from one tool to another." in html
     assert 'href="/compose-to-k8s" class="card' in html
     assert 'href="/validate-yaml" class="card' in html
     assert html.count("<svg") >= 6  # icons are inlined, not fetched
@@ -150,14 +150,14 @@ def test_404_page_has_a_way_back(client):
     response = client.get("/no-such-page")
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("text/html")
-    assert "There is no page at this address." in response.text
+    assert "We could not find that page." in response.text
     assert 'href="/"' in response.text
 
 
 def test_405_page(client):
     response = client.post("/", content=b"", headers={"Content-Length": "0"})
     assert response.status_code == 405
-    assert "is not allowed here" in response.text
+    assert "only works through the form" in response.text
 
 
 def test_malformed_form_gets_an_html_error(client, fake_api):
@@ -165,7 +165,7 @@ def test_malformed_form_gets_an_html_error(client, fake_api):
         "/compose-to-k8s", data={"compose_yaml": COMPOSE, "include_service": "maybe"}
     )
     assert response.status_code == 400
-    assert "was not filled in correctly" in response.text
+    assert "Some fields are missing or invalid" in response.text
     assert fake_api.requests == []
 
 
@@ -213,7 +213,7 @@ def test_compose_convert_renders_files_tabs_and_notes(client, fake_api):
     assert "web-deployment.yaml" in html and "web-service.yaml" in html
     assert "kind: Deployment" in html and "kind: Service" in html
     assert "placeholder requests were added" in html
-    assert "Needs a decision (1)" in html
+    assert "Review before you deploy (1)" in html
     assert "data-zip>" in html  # the zip button is shown once there are files
     # The form keeps what the user typed.
     assert 'value="shop"' in html
@@ -269,7 +269,7 @@ def test_upload_not_utf8(client, fake_api):
         files={"compose_file": ("x.yaml", b"\xff\xfe\x00bad", "text/yaml")},
     )
     assert response.status_code == 400
-    assert "is not UTF-8 text." in response.text
+    assert "reads UTF-8 text files" in response.text
     assert fake_api.requests == []
 
 
@@ -277,9 +277,9 @@ def test_upload_not_utf8(client, fake_api):
     ("data", "message"),
     [
         ({"compose_yaml": "   \n"}, "Paste some YAML"),
-        ({"compose_yaml": "a" * (MAX_INPUT_CHARS + 1)}, "longer than"),
-        ({"compose_yaml": COMPOSE, "namespace": "Bad_NS"}, "Namespace must be"),
-        ({"compose_yaml": COMPOSE, "output": "kustomize"}, "Output must be"),
+        ({"compose_yaml": "a" * (MAX_INPUT_CHARS + 1)}, "too long to convert"),
+        ({"compose_yaml": COMPOSE, "namespace": "Bad_NS"}, "Use a namespace"),
+        ({"compose_yaml": COMPOSE, "output": "kustomize"}, "Choose Manifests or Helm chart"),
     ],
 )
 def test_input_rejected_before_calling_api(client, fake_api, data, message):
@@ -327,7 +327,7 @@ def test_compose_unexpected_api_answer(client, fake_api):
     fake_api.body = {"detail": [{"msg": "..."}]}
     response = client.post("/compose-to-k8s", data={"compose_yaml": COMPOSE})
     assert response.status_code == 400
-    assert "could not process this input" in response.text
+    assert "Something went wrong while" in response.text
 
 
 def test_compose_success_without_files_list_is_an_error(client, fake_api):
@@ -433,14 +433,14 @@ def test_validate_valid(client, fake_api):
     response = client.post("/validate-yaml", data={"yaml_text": "a: 1\n---\nb: 2\n"})
     assert response.status_code == 200
     assert fake_api.requests == [("/validate/yaml", {"yaml": "a: 1\n---\nb: 2\n"})]
-    assert "Valid YAML: 2 documents." in response.text
+    assert "The YAML is valid (2 documents)." in response.text
     assert "<html" in response.text
 
 
 def test_validate_fragment_single_document(client, fake_api):
     fake_api.body = {"valid": True, "documents": 1}
     response = client.post("/validate-yaml", data={"yaml_text": "a: 1"}, headers=FRAGMENT)
-    assert "Valid YAML: 1 document." in response.text
+    assert "The YAML is valid (1 document)." in response.text
     assert "<html" not in response.text
 
 
@@ -487,7 +487,7 @@ def test_validate_unexpected_api_answer(client, fake_api):
     fake_api.body = {"detail": "bad"}
     response = client.post("/validate-yaml", data={"yaml_text": "a: 1"})
     assert response.status_code == 400
-    assert "could not process this input" in response.text
+    assert "Something went wrong while" in response.text
 
 
 def test_validate_api_down(client, fake_api):
@@ -505,14 +505,14 @@ def test_resolve_log_level():
     assert resolve_log_level(" Debug ") == ("DEBUG", None)
     level, warning = resolve_log_level("loud")
     assert level == "INFO"
-    assert 'Unknown LOG_LEVEL "loud": using info.' in warning
+    assert 'LOG_LEVEL "loud" is unknown, so the service logs at info.' in warning
 
 
 def test_configure_logging_warns_on_unknown_level(caplog):
     assert configure_logging("warning") == "WARNING"
     with caplog.at_level("WARNING", logger="web"):
         assert configure_logging("loud") == "INFO"
-    assert 'Unknown LOG_LEVEL "loud"' in caplog.text
+    assert 'LOG_LEVEL "loud" is unknown' in caplog.text
 
 
 def test_other_http_errors_render_the_error_page(fake_api):
@@ -630,7 +630,7 @@ def test_cfn_convert_renders_summary_files_resources_and_notes(client, fake_api)
     assert 'data-path="main.tf"' in html and "aws_s3_bucket" in html
     assert "Where each resource went (2)" in html
     assert "aws_s3_bucket.bucket" in html and "Custom::Hook" in html
-    assert "Needs a decision (1)" in html
+    assert "Review before you deploy (1)" in html
     assert 'name="provider" value="awscc" checked' in html
     assert 'value="shop"' in html
 
@@ -659,10 +659,10 @@ def test_cfn_convert_from_upload(client, fake_api):
     ("data", "message"),
     [
         ({"template": " "}, "Paste a template"),
-        ({"template": "a" * (MAX_TEMPLATE_CHARS + 1)}, "longer than 500,000"),
-        ({"template": TEMPLATE, "stack_name": "1bad"}, "Stack name must start"),
-        ({"template": TEMPLATE, "provider": "gcp"}, "Provider must be"),
-        ({"template": TEMPLATE, "layout": "tree"}, "Layout must be"),
+        ({"template": "a" * (MAX_TEMPLATE_CHARS + 1)}, "The limit is 500,000"),
+        ({"template": TEMPLATE, "stack_name": "1bad"}, "Use a stack name"),
+        ({"template": TEMPLATE, "provider": "gcp"}, "Choose aws or awscc"),
+        ({"template": TEMPLATE, "layout": "tree"}, "Choose split files or one main.tf"),
     ],
 )
 def test_cfn_input_rejected_before_calling_api(client, fake_api, data, message):
@@ -693,7 +693,7 @@ def test_cfn_unexpected_answer_and_outage(client, fake_api):
     fake_api.body = {"detail": []}
     response = client.post("/cfn-to-terraform", data={"template": TEMPLATE})
     assert response.status_code == 400
-    assert "could not process this input" in response.text
+    assert "Something went wrong while" in response.text
     fake_api.status = 503
     response = client.post("/cfn-to-terraform", data={"template": TEMPLATE})
     assert response.status_code == 502
@@ -709,8 +709,8 @@ def test_cfn_zip_has_files_and_notes(client, fake_api):
         assert archive.namelist() == ["versions.tf", "main.tf", "CONVERSION_NOTES.md"]
         notes = archive.read("CONVERSION_NOTES.md").decode()
     assert (
-        "Converted from AWS SAM by DevToolkit. The items below need a decision; "
-        "everything else was converted." in notes
+        "DevToolkit converted this AWS SAM template to Terraform. "
+        "Review these items before you apply it." in notes
     )
     assert "- Check the bucket name" in notes
 
@@ -721,8 +721,8 @@ def test_cfn_zip_without_notes_and_after_an_error(client, fake_api):
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         notes = archive.read("CONVERSION_NOTES.md").decode()
     assert (
-        "Converted from unknown-kind" in notes
-        and "- Nothing: every resource was converted." in notes
+        "DevToolkit converted this unknown-kind template" in notes
+        and "- Nothing to review. Every resource converted as it is." in notes
     )
     fake_api.status = 400
     fake_api.body = {"success": False, "error": "No resources"}
