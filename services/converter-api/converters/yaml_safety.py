@@ -124,11 +124,17 @@ def check_yaml_limits(text: str, max_depth: int = MAX_DEPTH, max_nodes: int = MA
         if isinstance(event, yaml.NodeEvent):
             nodes += 1
             if nodes > max_nodes:
-                raise YamlLimitError(f"Input too large: more than {max_nodes} values")
+                raise YamlLimitError(
+                    f"The YAML is too large: it has more than {max_nodes:,} values. "
+                    "Make it smaller and try again."
+                )
         if isinstance(event, yaml.CollectionStartEvent):
             depth += 1
             if depth > max_depth:
-                raise YamlLimitError("Invalid YAML: nested too deeply")
+                raise YamlLimitError(
+                    f"The YAML is nested too deeply. Use at most {max_depth} levels of lists "
+                    "and mappings."
+                )
         elif isinstance(event, yaml.CollectionEndEvent):
             depth -= 1
 
@@ -145,7 +151,8 @@ def check_node_count(data: Any, limit: int = MAX_NODES) -> None:
         count += 1
         if count > limit:
             raise YamlLimitError(
-                f"Input too large: more than {limit} values after expanding YAML aliases"
+                f"The YAML is too large: it has more than {limit:,} values once its aliases "
+                "are expanded. Use fewer aliases or a smaller file."
             )
         if isinstance(node, dict):
             stack.extend(node.keys())

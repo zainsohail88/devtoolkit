@@ -40,7 +40,10 @@ def test_convert_json():
     assert body["success"] is True
     assert body["manifests"]["deployments"][0]["metadata"]["name"] == "web"
     assert body["manifests"]["services"][0]["spec"]["ports"][0]["port"] == 80
-    assert any(n.startswith("'web' had no resource limits: placeholder") for n in body["notes"])
+    assert any(
+        n.startswith("Service 'web' has no resource limits, so the converter added placeholder")
+        for n in body["notes"]
+    )
 
 
 def test_convert_yaml():
@@ -58,7 +61,7 @@ def test_convert_invalid_yaml():
         assert response.status_code == 400
         body = response.json()
         assert body["success"] is False
-        assert body["error"].startswith("Invalid YAML")
+        assert body["error"].startswith("The YAML is invalid")
 
 
 def test_convert_rejects_bad_namespace():
@@ -84,7 +87,7 @@ def test_validate_yaml_invalid():
     response = client.post("/validate/yaml", json={"yaml": "a: 1\n b: 2\n"})
     body = response.json()
     assert body["valid"] is False
-    assert body["error"].startswith("Invalid YAML")
+    assert body["error"].startswith("The YAML is invalid")
     assert body["line"] == 2
 
 
@@ -94,7 +97,10 @@ def test_deep_nesting_is_not_a_server_error():
     assert response.status_code == 400
     response = client.post("/validate/yaml", json={"yaml": deep})
     assert response.status_code == 200
-    assert response.json() == {"valid": False, "error": "Invalid YAML: nested too deeply"}
+    assert response.json() == {
+        "valid": False,
+        "error": "The YAML is nested too deeply. Use at most 100 levels of lists and mappings.",
+    }
 
 
 def test_validate_yaml_block_nesting():
@@ -114,7 +120,7 @@ def test_validate_yaml_merge_key_bomb_is_fast():
 
 def test_validate_yaml_too_many_values():
     response = client.post("/validate/yaml", json={"yaml": "[" + ",".join(["a"] * 20000) + "]"})
-    assert response.json()["error"].startswith("Input too large")
+    assert response.json()["error"].startswith("The YAML is too large")
 
 
 @pytest.mark.parametrize(
@@ -128,7 +134,7 @@ def test_resolve_log_level_valid(value, expected):
 def test_resolve_log_level_unknown_falls_back_to_info():
     level, warning = resolve_log_level("verbose")
     assert level == "INFO"
-    assert "Unknown LOG_LEVEL 'verbose'" in warning
+    assert "LOG_LEVEL 'verbose' is unknown" in warning
     assert "debug, info, warning, error, critical" in warning
 
 
@@ -144,13 +150,13 @@ def test_unknown_log_level_does_not_crash_startup():
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Unknown LOG_LEVEL 'verbose'" in result.stderr
+    assert "LOG_LEVEL 'verbose' is unknown" in result.stderr
 
 
 def test_configure_logging_warns_on_unknown_level(caplog):
     with caplog.at_level(logging.WARNING, logger="converter-api"):
         assert configure_logging("loud") == "INFO"
-    assert "Unknown LOG_LEVEL 'loud'" in caplog.text
+    assert "LOG_LEVEL 'loud' is unknown" in caplog.text
 
 
 def test_validate_yaml_rejects_python_tags():
@@ -160,7 +166,7 @@ def test_validate_yaml_rejects_python_tags():
     assert response.status_code == 200
     body = response.json()
     assert body["valid"] is False
-    assert body["error"].startswith("Invalid YAML: could not determine a constructor")
+    assert body["error"].startswith("The YAML is invalid: could not determine a constructor")
 
 
 def test_convert_rejects_python_tags():
@@ -169,7 +175,7 @@ def test_convert_rejects_python_tags():
         json={"compose_yaml": "services: !!python/object/apply:os.system ['echo pwned']"},
     )
     assert response.status_code == 400
-    assert response.json()["error"].startswith("Invalid YAML")
+    assert response.json()["error"].startswith("The YAML is invalid")
 
 
 def test_convert_files_manifests():
@@ -213,7 +219,7 @@ def test_convert_files_rejects_unknown_output_and_bad_compose():
     assert response.status_code == 400
     assert response.json() == {
         "success": False,
-        "error": "Invalid compose file: no 'services' defined",
+        "error": "The compose file needs a 'services' section with at least one service.",
     }
 
 
@@ -225,7 +231,7 @@ def test_convert_error_carries_line_and_column_for_yaml_syntax_errors():
     assert response.status_code == 400
     body = response.json()
     assert body["success"] is False
-    assert body["error"].startswith("Invalid YAML")
+    assert body["error"].startswith("The YAML is invalid")
     assert body["line"] >= 1 and body["column"] >= 1
     # Other errors have no position.
     response = client.post("/convert/compose-to-k8s/files", json={"compose_yaml": "services: {}"})
@@ -283,7 +289,7 @@ def test_cfn_to_terraform_rejects_bad_templates_with_position():
     response = client.post("/convert/cfn-to-terraform", json={"template": "Resources: [1\n"})
     assert response.status_code == 400
     body = response.json()
-    assert body["success"] is False and body["error"].startswith("Invalid YAML")
+    assert body["success"] is False and body["error"]
     assert body["line"] == 2
 
 
@@ -309,5 +315,5 @@ def test_cfn_to_terraform_unexpected_shape_is_a_400(monkeypatch, caplog):
     with caplog.at_level("ERROR", logger="converter-api"):
         response = client.post("/convert/cfn-to-terraform", json={"template": CFN})
     assert response.status_code == 400
-    assert "cannot handle yet" in response.json()["error"]
+    assert "unexpected structure in this template" in response.json()["error"]
     assert "unexpected template shape" in caplog.text

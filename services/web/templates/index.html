@@ -1,9 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="py-8 sm:py-12">
-  <span class="tag">{% include "icons/wand-sparkles.svg" %} Free, in the browser, no sign-up</span>
-  <h1 class="mt-4 text-step-3 font-semibold tracking-tight">DevToolkit</h1>
-  <p class="mt-3 max-w-measure text-step-1 text-ink-muted">Converters for infrastructure configs. Open source, nothing stored.</p>
+  <h1 class="text-step-3 font-semibold tracking-tight">DevToolkit</h1>
+  <p class="mt-3 max-w-measure text-step-1 text-ink-muted">Move infrastructure code from one tool to another. Paste a Docker Compose file or a CloudFormation template and get Kubernetes manifests or Terraform back, with a short list of anything you need to finish yourself.</p>
 </section>
 
 <section aria-labelledby="tools-heading">
@@ -12,19 +11,19 @@
     <a href="/compose-to-k8s" class="card group">
       <span class="inline-flex size-10 items-center justify-center rounded-md bg-accent-soft text-ink-on-accent-soft">{% include "icons/boxes.svg" %}</span>
       <h3 class="mt-4 text-step-1 font-semibold">Docker Compose → Kubernetes</h3>
-      <p class="mt-1 text-small text-ink-muted">One file per resource or a Helm chart. Health checks become probes, <code class="font-mono">depends_on</code> becomes init containers, named volumes become claims.</p>
+      <p class="mt-1 text-small text-ink-muted">Turn a Compose file into Kubernetes manifests or a Helm chart. Health checks turn into probes, <code class="font-mono">depends_on</code> into init containers and named volumes into persistent volume claims.</p>
       <span class="mt-4 inline-flex items-center gap-1 text-small font-medium text-accent">Open <span class="transition-transform group-hover:translate-x-1">{% include "icons/arrow-right.svg" %}</span></span>
     </a>
     <a href="/cfn-to-terraform" class="card group">
       <span class="inline-flex size-10 items-center justify-center rounded-md bg-accent-soft text-ink-on-accent-soft">{% include "icons/layers.svg" %}</span>
       <h3 class="mt-4 text-step-1 font-semibold">CloudFormation → Terraform</h3>
-      <p class="mt-1 text-small text-ink-muted">CloudFormation, AWS SAM and <code class="font-mono">cdk synth</code> templates. Parameters become variables, <code class="font-mono">!Ref</code> and <code class="font-mono">!Sub</code> become expressions, SAM functions become the resources SAM would create.</p>
+      <p class="mt-1 text-small text-ink-muted">Turn a CloudFormation, AWS SAM or CDK template into Terraform. Parameters turn into variables, <code class="font-mono">!Ref</code> and <code class="font-mono">!Sub</code> into Terraform expressions and each SAM function into the resources SAM would deploy for it.</p>
       <span class="mt-4 inline-flex items-center gap-1 text-small font-medium text-accent">Open <span class="transition-transform group-hover:translate-x-1">{% include "icons/arrow-right.svg" %}</span></span>
     </a>
     <a href="/validate-yaml" class="card group">
       <span class="inline-flex size-10 items-center justify-center rounded-md bg-accent-soft text-ink-on-accent-soft">{% include "icons/file-check.svg" %}</span>
       <h3 class="mt-4 text-step-1 font-semibold">YAML check</h3>
-      <p class="mt-1 text-small text-ink-muted">Finds the first syntax error and marks the exact line and column in the editor. Multi-document files are supported.</p>
+      <p class="mt-1 text-small text-ink-muted">Check a YAML file for syntax errors. The editor highlights the first one at its exact line and column.</p>
       <span class="mt-4 inline-flex items-center gap-1 text-small font-medium text-accent">Open <span class="transition-transform group-hover:translate-x-1">{% include "icons/arrow-right.svg" %}</span></span>
     </a>
   </div>

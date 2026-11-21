@@ -69,7 +69,7 @@ def arguments(args: Any, counts: tuple[int, ...], function: str) -> list[Any]:
     """The argument list of an intrinsic, checked to hold one of `counts` values."""
     if not isinstance(args, list) or len(args) not in counts:
         expected = " or ".join(str(count) for count in counts)
-        raise CfnError(f"'{function}' takes a list of {expected} values")
+        raise CfnError(f"'{function}' needs a list of {expected} values. Check its arguments.")
     return args
 
 
@@ -110,7 +110,10 @@ def check_json_depth(value: Any) -> None:
     while stack:
         node, depth = stack.pop()
         if depth > MAX_JSON_DEPTH:
-            raise CfnError("A JSON document in the template is nested too deeply")
+            raise CfnError(
+                "A JSON document in the template nests too deeply. Reduce the nesting and try "
+                "again."
+            )
         if isinstance(node, dict):
             stack.extend((item, depth + 1) for item in node.values())
         elif isinstance(node, list):
@@ -188,7 +191,9 @@ class ExpressionConverter(ABC):
     def expr(self, value: Any, depth: int = 0) -> Any:
         """A CloudFormation value as an HCL value. Mapping keys are kept as written."""
         if depth > MAX_EXPRESSION_DEPTH:
-            raise CfnError("Template expressions are nested too deeply")
+            raise CfnError(
+                "An expression in the template nests too deeply. Reduce the nesting and try again."
+            )
         if isinstance(value, Expression):
             return Raw(value.text)
         if isinstance(value, dict):
@@ -280,7 +285,10 @@ class ExpressionConverter(ABC):
         """One intrinsic function."""
         handler = self.functions.get(function)
         if handler is None:
-            self.note(f"Intrinsic function '{function}' is not supported and became null")
+            self.note(
+                f"The intrinsic function '{function}' has no Terraform conversion, so the value "
+                "is null. Set it by hand."
+            )
             return None
         return handler(args, depth)
 
@@ -303,10 +311,10 @@ class ExpressionConverter(ABC):
         variables: dict[str, Any] = {}
         if isinstance(args, list):
             if len(args) != 2 or not isinstance(args[1], dict):
-                raise CfnError("'Fn::Sub' takes a string or [string, {variables}]")
+                raise CfnError("'Fn::Sub' needs a string or a [string, {variables}] pair.")
             args, variables = args
         if not isinstance(args, str):
-            raise CfnError("'Fn::Sub' needs a string")
+            raise CfnError("'Fn::Sub' needs a string as its template text.")
         pieces: list[Any] = []
         position = 0
         for match in SUB_VARIABLE.finditer(args):
@@ -356,7 +364,10 @@ class ExpressionConverter(ABC):
         if isinstance(items, list) and isinstance(index, int | str) and str(index).isdigit():
             position = int(index)
             if position >= len(items):
-                raise CfnError(f"'Fn::Select' index {position} is out of range")
+                raise CfnError(
+                    f"'Fn::Select' asks for index {position}, which is past the end of the list. "
+                    "Indexes start at 0."
+                )
             return self.expr(items[position], depth)
         return Raw(f"element({self.text(items)}, {hcl.inline(self.expr(index, depth))})")
 
@@ -370,7 +381,10 @@ class ExpressionConverter(ABC):
     def fn_get_azs(self, args: Any, depth: int) -> Any:
         """Fn::GetAZs: the availability zones of the current region."""
         if args not in ("", None) and args != {"Ref": "AWS::Region"}:
-            self.note("Fn::GetAZs for another region became the zones of the current region")
+            self.note(
+                "Fn::GetAZs asks for another region. Terraform reads the zones of the current "
+                "region instead. Set the zones by hand if you need that region."
+            )
         address = self.data("aws_availability_zones", "available", [Attr("state", "available")])
         return Raw(f"{address}.names")
 
@@ -387,7 +401,7 @@ class ExpressionConverter(ABC):
         except (TypeError, ValueError):
             count_value = bits_value = -1
         if count_value > MAX_CIDR_COUNT:
-            raise CfnError(f"'Fn::Cidr' makes at most {MAX_CIDR_COUNT} blocks")
+            raise CfnError(f"'Fn::Cidr' can make at most {MAX_CIDR_COUNT} blocks. Lower the count.")
         if isinstance(block, str) and count_value > 0 and bits_value > 0:
             return self.literal_cidr(block, count_value, bits_value)
         block_text = hcl.inline(self.expr(block, depth))
@@ -408,7 +422,10 @@ class ExpressionConverter(ABC):
                     break
             return subnets
         except ValueError as exc:
-            raise CfnError(f"'Fn::Cidr' is unable to split '{block}' that way") from exc
+            raise CfnError(
+                f"'Fn::Cidr' cannot split '{block}' that way. Check the CIDR block, the count and "
+                "the number of host bits."
+            ) from exc
 
     def fn_find_in_map(self, args: Any, depth: int) -> Any:
         """Fn::FindInMap, with lookup() when a DefaultValue is given."""
@@ -470,7 +487,7 @@ class ExpressionConverter(ABC):
     def logical(self, args: Any, depth: int, function: str) -> Any:
         """Fn::And or Fn::Or: the conditions joined by `&&` or `||`."""
         if not isinstance(args, list) or not 2 <= len(args) <= 10:
-            raise CfnError(f"'{function}' takes a list of 2 to 10 conditions")
+            raise CfnError(f"'{function}' needs a list of 2 to 10 conditions.")
         parts = [wrap_operand(hcl.inline(self.expr(arg, depth))) for arg in args]
         return Raw(f" {LOGICAL_OPERATORS[function]} ".join(parts))
 
@@ -488,11 +505,12 @@ class ExpressionConverter(ABC):
             export = rendered if isinstance(rendered, str) else hcl.inline(rendered)
         variable = self.placeholder_variable(
             f"import_{export}",
-            f"Value of the CloudFormation export '{export}' (Fn::ImportValue)",
+            f"The value of the CloudFormation export '{export}' (from Fn::ImportValue)",
         )
         self.note(
-            f"Fn::ImportValue '{export}' became {variable}: Terraform has no stack exports; "
-            "pass the value in or read it with a terraform_remote_state or data source"
+            f"Fn::ImportValue '{export}' reads a CloudFormation export. Terraform has no exports "
+            f"of its own, so the converter adds {variable} for it. Pass the value in or read it "
+            "with terraform_remote_state or a data source."
         )
         return Raw(variable)
 
@@ -510,6 +528,7 @@ class ExpressionConverter(ABC):
         """Fn::Transform runs a macro inside CloudFormation: reported, becomes null."""
         name = args.get("Name") if isinstance(args, dict) else None
         self.note(
-            f"Fn::Transform ({name or 'a macro'}) runs inside CloudFormation and was not converted"
+            f"Fn::Transform ({name or 'a macro'}) only runs inside CloudFormation, so the value "
+            "is null. Set it by hand."
         )
         return None

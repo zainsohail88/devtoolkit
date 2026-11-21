@@ -120,19 +120,23 @@ def test_json_templates_and_bom():
 @pytest.mark.parametrize(
     ("text", "message", "line"),
     [
-        ("", "Input is empty", None),
-        ("   ", "Input is empty", None),
-        ('{"Resources": ', "Invalid JSON", 1),
-        ("\n\n{\n  bad", "Invalid JSON", 4),
-        ("Resources: [1\n", "Invalid YAML", 2),
-        ("Resources:\n  B: !Unknown x\n", "Unknown YAML tag '!Unknown'", 2),
-        ("- 1\n- 2\n", "top level must be a mapping", None),
-        ("Description: x\n", "no 'Resources' defined", None),
-        ("Resources: [1]\n", "'Resources' must be a mapping", None),
+        ("", "The template is empty", None),
+        ("   ", "The template is empty", None),
+        ('{"Resources": ', "The JSON has a syntax error", 1),
+        ("\n\n{\n  bad", "The JSON has a syntax error", 4),
+        ("Resources: [1\n", "The YAML has a syntax error", 2),
+        ("Resources:\n  B: !Unknown x\n", "The YAML tag '!Unknown' is unknown", 2),
+        ("- 1\n- 2\n", "top level of the template must be a mapping", None),
+        ("Description: x\n", "needs a 'Resources' section", None),
+        ("Resources: [1]\n", "'Resources' section must be a mapping", None),
         ("Resources:\n  B: 1\n", "resource 'B' must be a mapping", None),
-        ("Resources:\n  B: {Properties: {}}\n", "resource 'B' has no 'Type'", None),
+        ("Resources:\n  B: {Properties: {}}\n", "resource 'B' needs a 'Type'", None),
         ("Resources:\n  B: {Type: X, Properties: [1]}\n", "'Properties' of 'B' must be", None),
-        ("Resources: {B: {Type: X}}\nParameters: [1]\n", "'Parameters' must be a mapping", None),
+        (
+            "Resources: {B: {Type: X}}\nParameters: [1]\n",
+            "'Parameters' section must be a mapping",
+            None,
+        ),
         ("Resources: {B: {Type: X}}\nParameters: {P: {Default: 1}}\n", "needs a 'Type'", None),
         ("Resources: {B: {Type: X}}\nOutputs: {O: {Description: x}}\n", "needs a 'Value'", None),
     ],
@@ -147,14 +151,14 @@ def test_invalid_templates(text, message, line):
 def test_size_and_depth_limits():
     with pytest.raises(CfnError, match="longer than"):
         load_template("a" * (MAX_TEMPLATE_CHARS + 1))
-    with pytest.raises(CfnError, match="nested too deeply"):
+    with pytest.raises(CfnError, match="too deeply"):
         load_template("Resources: " + "[" * 150 + "]" * 150)
-    with pytest.raises(CfnError, match="nested too deeply"):
+    with pytest.raises(CfnError, match="too deeply"):
         load_template('{"Resources": ' + "[" * 150 + "]" * 150 + "}")
-    with pytest.raises(CfnError, match="nested too deeply"):
+    with pytest.raises(CfnError, match="too deeply"):
         load_template('{"Resources": ' + "[" * 100_000 + "]" * 100_000 + "}")
     values = ",".join("0" * 100_001)
-    with pytest.raises(CfnError, match="Template too large"):
+    with pytest.raises(CfnError, match="The template has more than"):
         load_template('{"Resources": {"B": {"Type": "X", "Properties": {"V": [' + values + "]}}}}")
     with pytest.raises(CfnError, match="more than"):
         load_template("Resources: {B: {Type: X, Properties: {V: [" + values + "]}}}")
@@ -165,7 +169,7 @@ def test_alias_bombs_are_rejected():
     for level in range(1, 8):
         previous = "a" if level == 1 else f"a{level - 1}"
         bomb += f"a{level}: &a{level} [*{previous}, *{previous}, *{previous}, *{previous}]\n"
-    with pytest.raises(CfnError, match="Template too large"):
+    with pytest.raises(CfnError, match="The template has more than"):
         load_template(bomb + "Resources: {B: {Type: X, Properties: {V: *a7}}}\n")
 
 
@@ -343,7 +347,9 @@ def test_get_att_unknown_attribute_on_a_mapped_type_is_noted():
     }
     out = files(template)["outputs.tf"]
     assert "aws_s3_bucket.bucket.dual_stack_domain_name" in out
-    assert any("check that attribute exists" in n for n in notes(template))
+    assert any(
+        "Check in the Terraform docs that this attribute exists" in n for n in notes(template)
+    )
 
 
 def test_get_att_computed_attribute_name():
@@ -353,24 +359,27 @@ def test_get_att_computed_attribute_name():
         "Outputs": {"O": {"Value": {"Fn::GetAtt": ["Bucket", {"Ref": "A"}]}}},
     }
     assert "value = null" in files(template)["outputs.tf"]
-    assert any("computed attribute name" in n for n in notes(template))
+    assert any("builds its attribute name at deploy time" in n for n in notes(template))
 
 
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        ({"Ref": "Nope"}, "which is no parameter or resource"),
-        ({"Ref": ["x"]}, "takes the name"),
-        ({"Fn::GetAtt": ["Nope", "Arn"]}, "unknown resource 'Nope'"),
-        ({"Fn::GetAtt": ["Bucket"]}, "takes [resource, attribute]"),
+        ({"Ref": "Nope"}, "the template has no parameter or resource with that name"),
+        ({"Ref": ["x"]}, "needs the name of a parameter or resource"),
+        ({"Fn::GetAtt": ["Nope", "Arn"]}, "points to 'Nope', but the template has no resource"),
+        ({"Fn::GetAtt": ["Bucket"]}, "needs a resource and an attribute"),
         ({"Fn::Sub": 1}, "needs a string"),
-        ({"Fn::Sub": ["a", "b"]}, "takes a string or"),
-        ({"Fn::Join": ["a"]}, "'Fn::Join' takes a list of 2"),
-        ({"Fn::Select": [5, ["a"]]}, "out of range"),
-        ({"Fn::If": ["Nope", 1, 2]}, "Unknown condition 'Nope'"),
-        ({"Fn::FindInMap": ["Nope", "a", "b"]}, "unknown mapping 'Nope'"),
+        ({"Fn::Sub": ["a", "b"]}, "needs a string or a [string, {variables}] pair"),
+        ({"Fn::Join": ["a"]}, "'Fn::Join' needs a list of 2"),
+        ({"Fn::Select": [5, ["a"]]}, "past the end of the list"),
+        ({"Fn::If": ["Nope", 1, 2]}, "uses the condition 'Nope', but Conditions has no entry"),
+        (
+            {"Fn::FindInMap": ["Nope", "a", "b"]},
+            "points to the mapping 'Nope', but the template has no mapping",
+        ),
         ({"Fn::And": [{"Condition": "X"}]}, "2 to 10 conditions"),
-        ({"Fn::Cidr": ["not-a-cidr", 2, 8]}, "is unable to split"),
+        ({"Fn::Cidr": ["not-a-cidr", 2, 8]}, "cannot split"),
     ],
 )
 def test_invalid_intrinsics(value, message):
@@ -467,7 +476,7 @@ def test_import_value_becomes_a_variable():
     out = files(template)
     assert "value = var.import_net_vpc_id" in out["outputs.tf"]
     assert 'variable "import_net_vpc_id"' in out["variables.tf"]
-    assert any("Terraform has no stack exports" in n for n in notes(template))
+    assert any("Terraform has no exports of its own" in n for n in notes(template))
     computed = {"Fn::ImportValue": {"Fn::Sub": "${AWS::StackName}-Vpc"}}
     assert expression(computed).startswith("var.import_")
 
@@ -480,7 +489,7 @@ def test_language_extensions_and_unsupported_functions():
     assert expression({"Fn::Transform": {"Name": "AWS::Include"}}) == "null"
     assert expression({"Fn::Nope": 1}) == "null"
     unknown = {"Resources": dict(BUCKET), "Outputs": {"O": {"Value": {"Fn::Nope": 1}}}}
-    assert any("'Fn::Nope' is not supported" in n for n in notes(unknown))
+    assert any("'Fn::Nope' has no Terraform conversion" in n for n in notes(unknown))
 
 
 def test_plain_mappings_and_lists_keep_their_keys():
@@ -493,7 +502,7 @@ def test_expressions_nested_too_deeply():
     value: dict = {"Fn::Base64": "x"}
     for _ in range(60):
         value = {"Fn::Base64": value}
-    with pytest.raises(CfnError, match="nested too deeply"):
+    with pytest.raises(CfnError, match="too deeply"):
         expression(value)
 
 
@@ -564,7 +573,7 @@ def test_parameters_become_variables_with_validation():
     assert 'default = ["a", "b"]' in variables
     assert "sensitive = true" in variables
     assert 'default = "true"' in variables
-    assert 'description = "Image (name of the SSM parameter that holds the value)"' in variables
+    assert 'description = "Image (the name of the SSM parameter that holds the value)"' in variables
     assert 'variable "count_"' in variables
     main = out["main.tf"]
     assert 'data "aws_ssm_parameter" "ami" {\n name = var.ami\n}' in main
@@ -614,7 +623,7 @@ def test_resource_attributes():
     assert "count = local.on ? 1 : 0" in main
     assert "lifecycle {\n    prevent_destroy = true\n  }" in main
     assert "depends_on = [aws_s3_bucket.a]" in main
-    assert "# C (Custom::Thing) was not converted" in main
+    assert "# C (Custom::Thing) was left out" in main
     assert 'variable "c_result"' in out["variables.tf"]
     assert "value = var.c\n" in out["outputs.tf"]
     messages = "\n".join(notes(template))
@@ -622,16 +631,16 @@ def test_resource_attributes():
         "prevent_destroy",
         "Terraform takes no snapshot",
         "UpdateReplacePolicy Retain",
-        "has a CreationPolicy",
+        "CreationPolicy only works in CloudFormation",
         "cfn-init",
-        "custom resources run a Lambda function",
+        "Custom resources call a Lambda function",
     ):
         assert text in messages
 
 
 def test_unknown_depends_on_is_an_error():
     template = {"Resources": {"A": {"Type": "AWS::S3::Bucket", "DependsOn": "Nope"}}}
-    with pytest.raises(CfnError, match="DependsOn unknown resource 'Nope'"):
+    with pytest.raises(CfnError, match="has DependsOn 'Nope', but the template has no resource"):
         files(template)
 
 
@@ -645,8 +654,8 @@ def test_unsupported_types():
     result = convert_template(yaml.safe_dump(template))
     assert result["summary"] == {"resources": 2, "aws": 0, "awscc": 0, "unsupported": 2}
     messages = "\n".join(result["notes"])
-    assert "it exists inside CloudFormation only" in messages
-    assert "the aws mappings and the awscc provider both lack" in messages
+    assert "This type only exists inside CloudFormation" in messages
+    assert "Neither the aws mappings nor the awscc provider covers this type" in messages
     assert [r["address"] for r in result["resources"]] == [None, None]
 
 
@@ -664,16 +673,16 @@ def test_leftover_properties_are_kept_as_comments_and_noted():
         }
     }
     main = files(template)["main.tf"]
-    assert '# Unknown was not converted: {"a": "bbb' in main and "bbb...\n" in main
+    assert '# Unknown was left out. CloudFormation value: {"a": "bbb' in main and "bbb...\n" in main
     assert "Gone" not in main and "No was" not in main
-    assert any("'B.Unknown' was not converted" in n for n in notes(template))
+    assert any("no mapping for 'B.Unknown' yet" in n for n in notes(template))
 
 
 def test_generated_names_use_the_stack_name():
     template = {"Resources": {"T": {"Type": "AWS::DynamoDB::Table", "Properties": {}}}}
     out = files(template, {"stack_name": "shop"})
     assert 'name = "${var.stack_name}-T"' in out["main.tf"]
-    assert any("had no TableName" in n for n in notes(template))
+    assert any("the template leaves out TableName" in n for n in notes(template))
 
 
 # --- awscc ------------------------------------------------------------------------------
@@ -727,7 +736,7 @@ def test_awscc_conversion_follows_the_schema_index():
     versions = result["files"][0]["content"]
     assert "hashicorp/awscc" in versions and 'hashicorp/aws"' in versions
     assert result["summary"]["awscc"] == 4
-    assert any("the awscc provider was requested" in n for n in result["notes"])
+    assert any("because you chose the awscc provider" in n for n in result["notes"])
 
 
 def test_awscc_only_template_has_no_aws_provider():
@@ -768,9 +777,9 @@ def test_import_blocks():
         },
     }
     imports = files(template, {"include_imports": True})["imports.tf"]
-    assert "# Adopt the resources the stack created" in imports
+    assert "# These import blocks adopt the resources the stack already created" in imports
     assert 'to = aws_s3_bucket.named\n  id = "my-bucket"' in imports
-    assert 'to = aws_s3_bucket.unnamed[0]\n  id = "TODO: physical ID of Unnamed"' in imports
+    assert 'to = aws_s3_bucket.unnamed[0]\n  id = "TODO: the physical ID of Unnamed"' in imports
     assert "to = awscc_batch_job_queue.cc" in imports
     single = files(template, {"include_imports": True, "layout": "single"})["main.tf"]
     assert single.rstrip().endswith("}") and "import {" in single
@@ -804,23 +813,23 @@ def test_template_level_notes():
         "Resources": BUCKET,
     }
     messages = "\n".join(notes(template))
-    assert "Top-level section 'Extra'" in messages
-    assert "Transform 'AWS::SecretsManager-2020-07-23'" in messages
-    assert "Transform 'AWS::Include'" in messages
-    assert "Rules of the template were not converted" in messages
+    assert "The top-level section 'Extra' is unknown" in messages
+    assert "The transform 'AWS::SecretsManager-2020-07-23'" in messages
+    assert "The transform 'AWS::Include'" in messages
+    assert "The Rules section of the template was left out" in messages
     assert "LanguageExtensions" not in messages
 
 
 def test_invalid_options():
-    with pytest.raises(CfnError, match="Unknown provider"):
+    with pytest.raises(CfnError, match="The provider 'google' is unknown"):
         convert_template("Resources: {}", "google")
-    with pytest.raises(CfnError, match="Unknown layout"):
+    with pytest.raises(CfnError, match="The layout 'tree' is unknown"):
         convert_template("Resources: {}", "aws", "tree")
 
-    with pytest.raises(CfnError, match="Unknown provider"):
+    with pytest.raises(CfnError, match="The provider 'google' is unknown"):
         Converter({"Resources": {}}, provider="google")
     converter = Converter({"Resources": BUCKET})
-    with pytest.raises(CfnError, match="Unknown layout"):
+    with pytest.raises(CfnError, match="The layout 'tree' is unknown"):
         converter.files("tree")
 
 
@@ -872,12 +881,12 @@ def test_awscc_renamed_types_missing_properties_and_local_code():
     assert 'resource "awscc_cloudfront_cloudfront_origin_access_identity" "oai"' in main
     assert "s3_bucket = var.fn_code_bucket" in main and "s3_key    = var.fn_code_key" in main
     assert "content = {" in main and "var.layer_code_bucket" in main
-    assert "the awscc provider takes Lambda code from S3 only" in messages
-    assert "# DeliveryPolicy was not converted" in main
-    assert "# DeletionProtectionEnabled was not converted" in main
+    assert "the awscc provider reads Lambda code only from S3" in messages
+    assert "# DeliveryPolicy was left out" in main
+    assert "# DeletionProtectionEnabled was left out" in main
     assert (
-        "'Glue.FederatedCatalog.ConnectionType' is missing from awscc_glue_catalog in this "
-        "provider version" in messages
+        "awscc_glue_catalog in this awscc provider version has no argument for "
+        "'Glue.FederatedCatalog.ConnectionType'" in messages
     )
 
 
@@ -909,11 +918,11 @@ def test_blocks_from_computed_values():
     for name in ("Text", "Short", "Inverted", "Both"):
         props.block(name.lower(), name, fill_a)
     rendered = hcl.render_block(Block("resource", ["x", "y"], props.items))
-    assert "# Text was not converted" in rendered
-    assert "# Short was not converted" in rendered
+    assert "# Text was left out" in rendered
+    assert "# Short was left out" in rendered
     assert 'dynamic "inverted" {\n    for_each = !local.c ? [1] : []' in rendered
-    assert "# Both was not converted" in rendered
-    assert sum("computed by a function" in n for n in ctx.notes) == 3
+    assert "# Both was left out" in rendered
+    assert sum("comes from a function" in n for n in ctx.notes) == 3
 
 
 def test_json_values_and_template_parts():
@@ -995,7 +1004,7 @@ def test_optional_items_and_literal_guard():
     assert props.literal("M", dict) is None and props.literal("S", list) is None
     assert props.literal("Gone", list) is None
     assert props.literal("V", dict, value={"a": 1}) == {"a": 1}
-    assert sum("is computed by a function" in n for n in ctx.notes) == 2
+    assert sum("comes from a function" in n for n in ctx.notes) == 2
 
     info = ResourceInfo("R", "AWS::X::Y", "aws_x", "r")
     plain = Builder(ctx, info, {"Type": "AWS::X::Y"})

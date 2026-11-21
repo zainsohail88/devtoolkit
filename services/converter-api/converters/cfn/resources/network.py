@@ -305,9 +305,9 @@ class Route(ResourceConverter):
         )
         if b.props.has("InstanceId"):
             b.ctx.note(
-                f"{b.logical_id} routes to an instance: the aws provider routes to its network "
-                "interface instead (network_interface_id = aws_instance.<name>."
-                "primary_network_interface_id)"
+                f"{b.logical_id} routes to an instance, but the aws provider routes to its "
+                "network interface. Set network_interface_id = "
+                "aws_instance.<name>.primary_network_interface_id instead."
             )
 
 
@@ -419,8 +419,8 @@ ALL_PROTOCOLS = ("-1", "all")
 ICMP_PROTOCOLS = ("icmp", "icmpv6", "1", "58")
 ALLOW_ALL_EGRESS = {"IpProtocol": "-1", "CidrIp": "0.0.0.0/0"}
 EGRESS_COMMENT = (
-    "CloudFormation adds this allow-all egress rule when the template has none;\n"
-    "Terraform removes it, so it is written out."
+    "CloudFormation adds this allow-all egress rule to a group without egress rules.\n"
+    "Terraform removes that rule, so the converter writes it out here."
 )
 
 
@@ -557,8 +557,8 @@ class SecurityGroup(ResourceConverter):
             return
         if not isinstance(rules, list):
             b.ctx.note(
-                f"{b.logical_id}: the {kind} rules are computed by a function, so they were not "
-                "turned into rule resources; add them by hand"
+                f"{b.logical_id}: the {kind} rules come from a function, so the converter cannot "
+                "turn them into rule resources. Add them by hand."
             )
             return
         is_egress = kind == "egress"
@@ -570,10 +570,12 @@ class SecurityGroup(ResourceConverter):
             when, rule = b.ctx.optional_item(item)
             if not isinstance(rule, dict) or intrinsic_name(rule) is not None:
                 b.ctx.note(
-                    f"{b.props.owner}: '{where}' is computed by a function and was not "
-                    f"converted; add the aws_vpc_security_group_{kind}_rule by hand"
+                    f"{b.props.owner}: '{where}' comes from a function, so the converter left it "
+                    f"out. Add the aws_vpc_security_group_{kind}_rule by hand."
                 )
-                b.props.comment(f"{kind}[{number - 1}] was not converted: {snippet(item)}")
+                b.props.comment(
+                    f"{kind}[{number - 1}] was left out. CloudFormation value: {snippet(item)}"
+                )
                 continue
             inner = Props(b.ctx, rule, where, b.props.owner)
             items: list[Any] = [Attr("security_group_id", b.self_ref("id"))]
@@ -723,16 +725,22 @@ def _key_values(p: Props, cfn_name: str) -> list[tuple[str, Any]]:
     if not isinstance(raw, list) or not all(
         isinstance(item, dict) and isinstance(item.get("Key"), str) for item in raw
     ):
-        p.ctx.note(f"{p.owner}: '{p.where}.{cfn_name}' is computed and was not converted")
-        p.comment(f"{cfn_name} was not converted (computed)")
+        p.ctx.note(
+            f"{p.owner}: '{p.where}.{cfn_name}' is computed, so the converter left it out. Set "
+            "the attributes by hand."
+        )
+        p.comment(f"{cfn_name} was left out because its value is computed.")
         return []
     return [(item["Key"], item.get("Value")) for item in raw]
 
 
 def _unknown_attribute(p: Props, cfn_name: str, key: str, value: Any) -> None:
     """Report an attribute key the converter does not know, and keep it as a comment."""
-    p.ctx.note(f"{p.owner}: {cfn_name} '{key}' was not converted; set it by hand")
-    p.comment(f"{cfn_name} {snippet(key)} = {hcl.inline(p.ctx.expr(value))} was not converted")
+    p.ctx.note(
+        f"{p.owner}: {cfn_name} '{key}' is unknown to the converter, so it was left out. Set it "
+        "by hand."
+    )
+    p.comment(f"{cfn_name} {snippet(key)} = {hcl.inline(p.ctx.expr(value))} was left out")
 
 
 class LoadBalancer(ResourceConverter):
@@ -978,7 +986,8 @@ class TargetGroup(ResourceConverter):
                 b.add_resource("aws_lb_target_group_attachment", f"_target_{number}", inner.items)
         elif targets is not None:
             ctx.note(
-                f"{b.logical_id}: Targets is computed and was not converted; attach them by hand"
+                f"{b.logical_id}: Targets is computed, so the converter left it out. Attach the "
+                "targets by hand."
             )
 
 
@@ -1086,7 +1095,10 @@ def _certificate_arns(b: Builder) -> list[Any]:
     if certificates is None:
         return []
     if not isinstance(certificates, list):
-        b.ctx.note(f"{b.logical_id}: Certificates is computed and was not converted")
+        b.ctx.note(
+            f"{b.logical_id}: Certificates is computed, so the converter left it out. Set the "
+            "certificates by hand."
+        )
         return []
     return [
         c["CertificateArn"] for c in certificates if isinstance(c, dict) and "CertificateArn" in c
@@ -1179,8 +1191,8 @@ class ListenerRule(ResourceConverter):
         field = c.take("Field")
         legacy = c.take("Values")
         if not isinstance(field, str) or field not in self.condition_configs:
-            c.ctx.note(f"{c.owner}: rule condition '{field}' was not converted; set it by hand")
-            c.comment(f"Condition on {snippet(field)} was not converted")
+            c.ctx.note(f"{c.owner}: the rule condition on '{field}' was left out. Set it by hand.")
+            c.comment(f"The condition on {snippet(field)} was left out")
             return
         tf_name, cfn_name = self.condition_configs[field]
         config = c.literal(cfn_name, dict) or {}
@@ -1334,7 +1346,10 @@ class RecordSetGroup(RecordSet):
         p.drop("Comment")
         records = p.take("RecordSets")
         if not isinstance(records, list) or not records:
-            b.ctx.note(f"{b.logical_id}: RecordSets is empty or computed and was not converted")
+            b.ctx.note(
+                f"{b.logical_id}: RecordSets is empty or computed, so the converter left it out. "
+                "Add the records by hand."
+            )
             return
         for number, record in enumerate(records, start=1):
             values: dict[str, Any] = {}
@@ -1420,8 +1435,9 @@ class Certificate(ResourceConverter):
             self.validation_records(b, zones)
         elif method == "DNS":
             ctx.note(
-                f"{b.logical_id} is validated by DNS without a hosted zone: add the records from "
-                "domain_validation_options and an aws_acm_certificate_validation resource"
+                f"{b.logical_id} is validated by DNS, but the template names no hosted zone. Add "
+                "the records from domain_validation_options and an "
+                "aws_acm_certificate_validation resource."
             )
 
     def validation_records(self, b: Builder, zones: dict[str, Any]) -> None:
@@ -1486,7 +1502,10 @@ class Distribution(ResourceConverter):
         p.tags()
         config = p.take("DistributionConfig")
         if not isinstance(config, dict) or intrinsic_name(config) is not None:
-            b.ctx.note(f"{b.logical_id}: DistributionConfig is missing or computed; set it by hand")
+            b.ctx.note(
+                f"{b.logical_id}: DistributionConfig is missing or computed, so the converter "
+                "left it out. Set it by hand."
+            )
             return
         c = Props(b.ctx, config, f"{b.logical_id}.DistributionConfig", p.owner)
         c.boolean("enabled", "Enabled")
@@ -1553,7 +1572,7 @@ class Distribution(ResourceConverter):
             if s3.get("OriginReadTimeout") is not None:
                 ctx.note(
                     f"{r.owner}: '{r.where}.S3OriginConfig.OriginReadTimeout' has no Terraform "
-                    "counterpart for S3 origins and was not converted"
+                    "equivalent for S3 origins, so it was left out."
                 )
         r.block("custom_origin_config", "CustomOriginConfig", self.fill_custom_origin)
         r.block("origin_shield", "OriginShield", self.fill_origin_shield)
@@ -1587,8 +1606,8 @@ class Distribution(ResourceConverter):
         if not c.list_attr("origin_ssl_protocols", "OriginSSLProtocols"):
             c.set("origin_ssl_protocols", ["TLSv1.2"])
             c.ctx.note(
-                f"{c.owner}: '{c.where}' had no OriginSSLProtocols; Terraform requires them, so "
-                "TLSv1.2 was set"
+                f"{c.owner}: '{c.where}' leaves out OriginSSLProtocols. Terraform requires them, "
+                "so the converter uses TLSv1.2."
             )
         c.number("origin_read_timeout", "OriginReadTimeout")
         c.number("origin_keepalive_timeout", "OriginKeepaliveTimeout")

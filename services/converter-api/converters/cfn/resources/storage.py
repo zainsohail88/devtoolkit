@@ -361,9 +361,9 @@ class S3Bucket(ResourceConverter):
             items += [BLANK, Attr("depends_on", [Raw(ownership_address)])]
         else:
             b.ctx.note(
-                f"{b.logical_id} sets AccessControl: S3 disables ACLs by default, so the "
+                f"{b.logical_id} sets AccessControl. S3 disables ACLs by default, so "
                 "aws_s3_bucket_acl only works once OwnershipControls is ObjectWriter or "
-                "BucketOwnerPreferred"
+                "BucketOwnerPreferred."
             )
         b.add_resource("aws_s3_bucket_acl", "_acl", items)
 

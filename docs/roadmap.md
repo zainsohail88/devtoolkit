@@ -1,8 +1,8 @@
 # Roadmap
 
-DevToolkit builds converters that are **rare or missing elsewhere**. Tools found in many places already (Base64, JWT decoders, cron explainers and the like) are left to those places.
+DevToolkit builds converters that **few other tools offer**. For common tasks such as Base64, JWT decoding or explaining cron expressions, use one of the many tools that already exist.
 
-Features are listed in priority order and tracked on the [DevToolkit roadmap board](https://github.com/users/zainsohail88/projects/2/views/3). Dates are targets.
+The features below are in priority order. The [DevToolkit roadmap board](https://github.com/users/zainsohail88/projects/2/views/3) tracks them. The dates are targets.
 
 ## Timeline
 
@@ -32,23 +32,23 @@ gantt
 | Feature | What it does | Why it is needed |
 |---------|--------------|------------------|
 | **Two-way CI converter** | Any direction between GitHub Actions, GitLab CI, CircleCI, Jenkins (declarative) and Azure Pipelines | Existing tools convert one way only, into GitHub Actions |
-| **Kubernetes → Docker Compose** | Deployments, Services, ConfigMaps → Compose services | No maintained tool goes this direction |
-| **Compose / Kubernetes ↔ AWS ECS** | Both directions between Compose, Kubernetes and ECS task definitions | Existing tools are stale or cover Compose in part |
+| **Kubernetes → Docker Compose** | Deployments, Services, ConfigMaps → Compose services | Maintained tools convert only the other way, from Compose to Kubernetes |
+| **Compose / Kubernetes ↔ AWS ECS** | Both directions between Compose, Kubernetes and ECS task definitions | Existing tools are out of date or cover only part of Compose |
 | **nginx.conf → Gateway API** | `server`/`location`/`proxy_pass` → `Gateway` + `HTTPRoute` | Existing tools start from Kubernetes Ingress |
-| **Firewall rules translator** | Any direction between AWS Security Groups, GCP firewall rules, Azure NSGs and Kubernetes NetworkPolicy | No tool covers GCP or NetworkPolicy |
-| **Prometheus alerts → Datadog / CloudWatch** | Prometheus alerting rules → Datadog monitors and CloudWatch alarms | No converter targets Datadog or CloudWatch |
+| **Firewall rules translator** | Any direction between AWS Security Groups, GCP firewall rules, Azure NSGs and Kubernetes NetworkPolicy | Existing tools leave out GCP and NetworkPolicy |
+| **Prometheus alerts → Datadog / CloudWatch** | Prometheus alerting rules → Datadog monitors and CloudWatch alarms | Existing converters leave out Datadog and CloudWatch |
 
-Every converter follows the same rule as the existing ones: whatever it converts only in part is reported in `notes`. Each one gets a page in the web UI as well as an API endpoint.
+Each new converter works like the existing ones. It reports anything it converts only in part in `notes`. It also gets a web page and an API endpoint.
 
 ## Later
 
-- Ad-supported public hosting, from the original project vision. Revisit once the web UI has been live for a while.
+- Ad-supported public hosting, an idea from the original project plan. We will look at it again once the web UI has been live for a while.
 
 ## Done
 
 - `converter-api` (FastAPI): Docker Compose to Kubernetes, YAML validation
 - **AWS → Terraform** ([#9](https://github.com/zainsohail88/devtoolkit/issues/9)): CloudFormation (JSON/YAML), AWS SAM and AWS CDK (`cdk synth` output) to Terraform, with hand-written `aws` provider mappings for 85 common types and the `awscc` provider for the rest; CI checks the output with `terraform validate`. See [CloudFormation to Terraform](reference/cloudformation-to-terraform.md)
-- `web` (FastAPI + Jinja2 + Tailwind): a page per tool, calls the API server-side; the API is reachable from `web` only
+- `web` (FastAPI + Jinja2 + Tailwind): a page per tool that calls the API from the server. Only `web` can reach the API
 - Plain Kubernetes manifests: probes, resource limits, non-root, restricted Pod Security, NetworkPolicy
 - CI: lint and house code rules, tests with a 95% coverage gate, Docker builds, manifest validation, Terraform validation, end-to-end on kind including the NetworkPolicy
 - Image publishing to GitHub Container Registry, one image per service
@@ -56,7 +56,7 @@ Every converter follows the same rule as the existing ones: whatever it converts
 
 ## Dropped
 
-- **`utility-api`** (Base64, JWT decode, cron explain, hashing). These tools are widely available already, so building them would add clutter.
+- **`utility-api`** (Base64, JWT decode, cron explain, hashing). Many tools already do these jobs well, so building them here would only add clutter.
 
 ## Out of scope
 

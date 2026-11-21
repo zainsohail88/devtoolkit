@@ -239,7 +239,7 @@ def test_group_with_standalone_rules_gets_rule_resources():
     assert 'cidr_ipv6 = "::/0"' in hcl
     assert "ingress {" not in hcl
     assert any(
-        "Other: the ingress rules are computed by a function, so they were not turned into" in n
+        "Other: the ingress rules come from a function, so the converter cannot turn them" in n
         for n in notes
     )
     assert "ip_protocol = var.proto" in hcl
@@ -495,7 +495,7 @@ def test_listener_rule_conditions():
     assert 'key = "v"' in hcl and 'value = "beta"' in hcl
     assert 'values = ["10.0.0.0/8"]' in hcl
     assert 'regex_values = ["^/a"]' in hcl
-    assert any("rule condition 'made-up'" in n for n in notes)
+    assert any("rule condition on 'made-up' was left out" in n for n in notes)
 
 
 # --- Route 53 -----------------------------------------------------------------------------
@@ -643,7 +643,9 @@ def test_certificate_validation_variants():
     )
     assert 'certificate_transparency_logging_preference = "DISABLED"' in hcl
     assert 'validation_option { domain_name = "a.com"' in hcl
-    assert any("NoZone is validated by DNS without a hosted zone" in n for n in notes)
+    assert any(
+        "NoZone is validated by DNS, but the template names no hosted zone" in n for n in notes
+    )
     assert "flatten(aws_acm_certificate.two_zones[*].domain_validation_options)" in hcl
     assert 'lookup({ "c.com" = "Z1", "d.com" = "Z2" }, each.key, "Z1")' in hcl
     assert "certificate_arn = aws_acm_certificate.two_zones[0].arn" in hcl
@@ -756,11 +758,11 @@ def test_distribution_full_config():
         'origin_access_identity = "origin-access-identity/cloudfront/'
         '${aws_cloudfront_origin_access_identity.oai.id}"' in hcl
     )
-    assert any("OriginReadTimeout' has no Terraform counterpart" in n for n in notes)
+    assert any("OriginReadTimeout' has no Terraform equivalent for S3 origins" in n for n in notes)
     assert 'custom_header { name = "X-A"' in hcl
     assert "origin_shield {" in hcl and 'vpc_origin_id = "vo-1"' in hcl
     assert 'origin_ssl_protocols = ["TLSv1.2"]' in hcl
-    assert any("had no OriginSSLProtocols" in n for n in notes)
+    assert any("leaves out OriginSSLProtocols" in n for n in notes)
     assert "status_codes = [500, 502]" in hcl and hcl.count("member {") == 2
     assert "default_ttl = 60" in hcl
     assert 'function_arn = "arn:fn"' in hcl and "include_body = true" in hcl
@@ -886,8 +888,8 @@ def test_standalone_rules_from_optional_items_are_counted():
     )
     assert 'cidr_ipv4 = "10.0.0.0/8"' in hcl
     assert "sg_ingress_2" not in hcl and "sg_ingress_3" not in hcl
-    assert "ingress[2] was not converted" in hcl
-    assert any("'Sg.ingress[2]' is computed by a function" in n for n in notes)
+    assert "ingress[2] was left out" in hcl
+    assert any("'Sg.ingress[2]' comes from a function" in n for n in notes)
 
 
 def test_default_egress_kept_when_the_egress_rules_are_optional():
@@ -921,7 +923,7 @@ def test_default_egress_kept_when_the_egress_rules_are_optional():
     assert "for_each = !local.on ? [1] : [] content { from_port = 443" in swapped
     assert f"for_each = local.on ? [1] : [] content {{ {ALLOW_ALL}" in swapped
     computed = hcl.split('resource "aws_security_group" "computed"')[1].split('resource "')[0]
-    assert "Egress was not converted" in computed
+    assert "Egress was left out" in computed
     assert (
         'resource "aws_vpc_security_group_egress_rule" "standalone_egress_1" '
         "{ count = local.on ? 1 : 0 security_group_id = aws_security_group.standalone.id "
@@ -929,12 +931,12 @@ def test_default_egress_kept_when_the_egress_rules_are_optional():
     ) in hcl
     assert (
         'resource "aws_vpc_security_group_egress_rule" "standalone_egress_2" { count = !local.on '
-        "? 1 : 0 # CloudFormation adds this allow-all egress rule when the template has none; "
-        "# Terraform removes it, so it is written out. security_group_id = "
+        "? 1 : 0 # CloudFormation adds this allow-all egress rule to a group without egress rules. "
+        "# Terraform removes that rule, so the converter writes it out here. security_group_id = "
         'aws_security_group.standalone.id ip_protocol = "-1" cidr_ipv4 = "0.0.0.0/0" }'
     ) in hcl
-    assert any("Computed.Egress' is computed by a function" in n for n in notes)
-    assert any("Odd.Egress' is computed by a function" in n for n in notes)
+    assert any("Computed.Egress' comes from a function" in n for n in notes)
+    assert any("Odd.Egress' comes from a function" in n for n in notes)
 
 
 def _target_group(attributes: list, props: dict | None = None) -> dict:
@@ -968,8 +970,13 @@ def test_target_group_stickiness_defaults_and_cookie_durations():
         'stickiness { enabled = true type = "app_cookie" cookie_name = "SESS" '
         "cookie_duration = 600 }"
     ) in hcl
-    assert 'TargetGroupAttributes "stickiness.lb_cookie.duration_seconds" = "3600" was not' in hcl
-    assert any("'stickiness.lb_cookie.duration_seconds' was not converted" in n for n in notes)
+    assert (
+        'TargetGroupAttributes "stickiness.lb_cookie.duration_seconds" = "3600" was left out' in hcl
+    )
+    assert any(
+        "TargetGroupAttributes 'stickiness.lb_cookie.duration_seconds' is unknown" in n
+        for n in notes
+    )
 
 
 def test_partial_health_check_gets_the_aws_thresholds():
@@ -1135,16 +1142,16 @@ def test_lists_from_functions_do_not_crash():
     assert 'query_string { value = "v" }' in hcl
     assert 'failover_criteria { status_codes = [500] } member { origin_id = "web" }' in hcl
     for text in (
-        "FunctionAssociations was not converted",
-        "S3OriginConfig was not converted",
-        "StatusCodes was not converted",
-        "Members.Items was not converted",
-        "Values was not converted",
-        "HostHeaderConfig was not converted",
-        "TargetGroups was not converted",
+        "FunctionAssociations was left out",
+        "S3OriginConfig was left out",
+        "StatusCodes was left out",
+        "Members.Items was left out",
+        "Values was left out",
+        "HostHeaderConfig was left out",
+        "TargetGroups was left out",
     ):
         assert text in hcl
-    assert any("computed by a function" in n for n in notes)
+    assert any("comes from a function" in n for n in notes)
 
 
 def test_distribution_http_version_and_zone_comment_defaults():

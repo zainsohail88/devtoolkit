@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Docker Compose → Kubernetes · DevToolkit{% endblock %}
-{% block description %}Convert a docker-compose file into Kubernetes manifests or a Helm chart, one file per resource.{% endblock %}
+{% block description %}Convert a Docker Compose file into Kubernetes manifests or a Helm chart.{% endblock %}
 {% block content %}
 <div class="flex flex-wrap items-end justify-between gap-4">
   <div>
     <h1 class="text-step-2 font-semibold">Docker Compose → Kubernetes</h1>
-    <p class="mt-1 max-w-measure text-ink-muted">Health checks become probes, <code class="font-mono">depends_on</code> becomes init containers, named volumes become claims. Only what your file needs is generated.</p>
+    <p class="mt-1 max-w-measure text-ink-muted">Paste your Compose file to get Kubernetes manifests or a Helm chart. Health checks turn into probes, <code class="font-mono">depends_on</code> into init containers and named volumes into persistent volume claims. You get only the resources your services use.</p>
   </div>
 </div>
 
@@ -39,7 +39,7 @@
       </fieldset>
       <label class="inline-flex min-h-11 items-center gap-2 text-small">
         <input type="checkbox" name="include_service" value="true" {% if include_service %}checked{% endif %}>
-        Services
+        Add a Service for each port
       </label>
       <button type="submit" class="btn btn-primary ml-auto" data-submit>{% include "icons/play.svg" %} Convert</button>
     </div>
@@ -47,7 +47,7 @@
 
   <section aria-labelledby="result-heading" aria-live="polite" class="grid content-start gap-3">
     <div class="flex flex-wrap items-center justify-between gap-2">
-      <h2 id="result-heading" class="font-mono text-small font-medium">output</h2>
+      <h2 id="result-heading" class="font-mono text-small font-medium">kubernetes</h2>
       <button type="submit" class="btn btn-secondary btn-sm" formaction="/compose-to-k8s/zip" data-zip{% if not files %} hidden{% endif %}>{% include "icons/download.svg" %} Download all (.zip)</button>
     </div>
     <div id="result">

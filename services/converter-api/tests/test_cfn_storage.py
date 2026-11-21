@@ -29,7 +29,7 @@ def convert(resources: dict, extra: dict | None = None) -> tuple[str, list[str]]
 def test_fixture_converts_everything():
     result = convert_template(FIXTURE.read_text(), stack_name="demo")
     assert result["summary"]["unsupported"] == 0
-    assert not [n for n in result["notes"] if "was not converted" in n]
+    assert not [n for n in result["notes"] if "was left out" in n]
     files = {f["path"]: squeeze(f["content"]) for f in result["files"]}
     main = files["main.tf"]
     assert "kms_key_arn = data.aws_kms_key.events_sse_key.arn" in main
@@ -200,8 +200,11 @@ def test_dynamodb_table_with_only_a_hash_key_and_no_stream():
         }
     )
     assert 'name = "t"' in main and "hash_key" not in main
-    assert 'local_secondary_index {\n name = "l"\n # Projection was not converted: "x"\n }' in main
-    assert '# KeySchema was not converted: "computed"' in main
+    assert (
+        'local_secondary_index {\n name = "l"\n'
+        ' # Projection was left out. CloudFormation value: "x"\n }' in main
+    )
+    assert '# KeySchema was left out. CloudFormation value: "computed"' in main
     assert not any("TableName" in n for n in notes)
 
 
@@ -365,9 +368,12 @@ def test_conditional_stream_and_stream_policy_is_reported():
     assert "stream_enabled = local.on" in main
     assert 'stream_view_type = local.on ? "KEYS_ONLY" : null' in main
     assert "stream_view_type = null" not in main
-    assert '# ResourcePolicy was not converted: {"P": 1}' in main
-    assert any("'Policy.StreamSpecification.ResourcePolicy' was not converted" in n for n in notes)
-    assert "# StreamSpecification was not converted" in main
+    assert '# ResourcePolicy was left out. CloudFormation value: {"P": 1}' in main
+    assert any(
+        "'Policy.StreamSpecification.ResourcePolicy' yet" in n
+        for n in notes
+    )
+    assert "# StreamSpecification was left out" in main
 
 
 def test_contributor_insights_of_an_index_is_reported():
@@ -387,7 +393,7 @@ def test_contributor_insights_of_an_index_is_reported():
             )
         }
     )
-    assert "# ContributorInsightsSpecification was not converted" in main
+    assert "# ContributorInsightsSpecification was left out" in main
     assert any("GlobalSecondaryIndexes[0].ContributorInsightsSpecification" in n for n in notes)
 
 
@@ -424,10 +430,10 @@ def test_computed_table_structures_are_reported_not_guessed():
     )
     assert 'dynamic "attribute" {\n for_each = local.on ? [1] : []' in main
     assert 'name = "gk"' in main
-    assert main.count("# AttributeDefinitions was not converted") == 2
-    assert main.count("# KeySchema was not converted") == 3
-    assert "# ProvisionedThroughput was not converted" in main
-    assert "# Projection was not converted" in main
+    assert main.count("# AttributeDefinitions was left out") == 2
+    assert main.count("# KeySchema was left out") == 3
+    assert "# ProvisionedThroughput was left out" in main
+    assert "# Projection was left out" in main
     assert 'projection_type = "ALL"' not in main
 
 
@@ -469,9 +475,9 @@ def test_lifecycle_rule_with_conditional_and_computed_parts():
     assert "noncurrent_days = null" not in main
     assert 'tag {\n key = "a"' in main
     for name in ("Transitions", "TagFilters"):
-        assert main.count(f"# {name} was not converted") == 2
-    assert "# NoncurrentVersionExpiration was not converted" in main
-    assert "# AbortIncompleteMultipartUpload was not converted" in main
+        assert main.count(f"# {name} was left out") == 2
+    assert "# NoncurrentVersionExpiration was left out" in main
+    assert "# AbortIncompleteMultipartUpload was left out" in main
 
 
 def test_more_than_a_thousand_lifecycle_rules():
@@ -537,12 +543,12 @@ def test_conditional_and_computed_notification_parts():
         },
         CONDITION,
     )
-    assert "# Filter.S3Key.Rules was not converted" in main
+    assert "# Filter.S3Key.Rules was left out" in main
     assert 'filter_suffix = ".x"' in main
-    assert "# Filter.S3Key was not converted" in main
+    assert "# Filter.S3Key was left out" in main
     assert "eventbridge = local.on ? true : false" in main
     assert "eventbridge = true" in main
-    assert "# EventBridgeConfiguration was not converted" in main
+    assert "# EventBridgeConfiguration was left out" in main
 
 
 def test_conditional_and_computed_ecr_lifecycle_policy():
@@ -575,9 +581,11 @@ def test_conditional_and_computed_ecr_lifecycle_policy():
     )
     lifecycle = main.split('resource "aws_ecr_lifecycle_policy" "cond_lifecycle"')[1]
     assert lifecycle.startswith(" {\n count = local.on ? 1 : 0")
-    assert main.count('# RegistryId was not converted: "1"') == 2
-    assert any("'Registry.LifecyclePolicy.RegistryId' was not converted" in n for n in notes)
-    assert "# LifecyclePolicy was not converted" in main
+    assert main.count('# RegistryId was left out. CloudFormation value: "1"') == 2
+    assert any(
+        "'Registry.LifecyclePolicy.RegistryId' yet" in n for n in notes
+    )
+    assert "# LifecyclePolicy was left out" in main
 
 
 def test_storage_template_text_cannot_inject_hcl():

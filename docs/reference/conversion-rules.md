@@ -1,6 +1,6 @@
 # Conversion rules
 
-How each docker-compose (v3) field becomes Kubernetes. The output is proportional to the input: exactly the resources the compose file needs.
+This page shows how each Docker Compose (v3) field converts to Kubernetes. The converter writes only the resources that the compose file needs.
 
 ## What is generated
 
@@ -9,13 +9,13 @@ How each docker-compose (v3) field becomes Kubernetes. The output is proportiona
 | `services.<name>` | Deployment | Always |
 | `services.<name>.ports` / `expose` | ClusterIP Service | The service has ports and Services are enabled |
 | Named volume (`dbdata:/var/lib/postgresql/data`) | PersistentVolumeClaim, one per volume name | The volume is internal (`external` unset) |
-| `namespace` other than `default` | Namespace | The requested namespace is another one |
+| `namespace` other than `default` | Namespace | You set `namespace` to another name |
 
 Files are written in apply order: Namespace, PersistentVolumeClaims, Deployments, Services.
 
 ## Field mapping
 
-| docker-compose | Kubernetes |
+| Docker Compose | Kubernetes |
 |----------------|------------|
 | `image` | `containers[].image` |
 | `build` (no `image`) | Image `<name>:latest`, with a note to push it to a registry |
@@ -51,9 +51,9 @@ Port ranges (`"3000-3005"`) return an error.
 | `memory: 1g` | `1Gi` |
 | `memory: 268435456` (bytes) | `256Mi` |
 
-`cpus` must be at least `0.001`, because anything smaller would round to zero CPU.
+`cpus` must be at least `0.001`, because a smaller value would round to zero CPU.
 
-Every container gets requests and limits, because an unbounded pod is the one thing Kubernetes will happily schedule and then evict:
+Every container gets requests and limits. Without them, Kubernetes still schedules the pod but may evict it when the node runs low on resources. The converter sets them like this:
 
 | Compose declares | Output | Note |
 |------------------|--------|------|
@@ -72,7 +72,7 @@ Every container gets requests and limits, because an unbounded pod is the one th
 | `retries` | `failureThreshold` |
 | `start_period` | `initialDelaySeconds` |
 
-The same probe is used for liveness and readiness. `test: ["NONE"]`, `disable: true` or a missing `test` produce no probes. Durations accept compose syntax (`1m30s`, `500ms`) and are rounded up to whole seconds.
+The same probe serves for liveness and readiness. With `test: ["NONE"]`, `disable: true` or no `test`, the container gets no probes. Durations use compose syntax (`1m30s`, `500ms`) and are rounded up to whole seconds.
 
 ### Startup order
 
@@ -85,7 +85,7 @@ initContainers:
     command: [sh, -c, "until nc -z db 5432; do sleep 2; done"]
 ```
 
-A dependency without ports (or with Services disabled) has nothing to wait on, so it becomes a note. A dependency missing from the services of the file is an error.
+When a dependency has no ports or Services are turned off, there is no port to wait on. The converter then adds a note in place of the init container. A `depends_on` entry that names a service missing from the file is an error.
 
 ### Volumes
 
@@ -95,43 +95,43 @@ A dependency without ports (or with Services disabled) has nothing to wait on, s
 | `data:/x:ro` | Same, mounted `readOnly` |
 | `/tmp` (anonymous) | `emptyDir` + mount |
 | `{type: tmpfs, target: /run}` | `emptyDir` with `medium: Memory` |
-| `./src:/app` or `/host/path:/x` (bind mount) | Not converted; reported as a note |
-| Named volume declared `external: true` | Mounted as a claim that must already exist; no PVC generated |
+| `./src:/app` or `/host/path:/x` (bind mount) | Left out and reported in the notes |
+| Named volume declared `external: true` | Mounted from a claim with that name, which must already exist |
 
-The PVC size is a placeholder and is reported as a note. A named volume mounted by more than one service becomes one PVC, with a note that ReadWriteOnce keeps those pods on the same node.
+The PVC size is a placeholder that a note asks you to adjust. A named volume that several services mount becomes one PVC. A note then warns that with ReadWriteOnce, those pods must run on the same node.
 
 ## Notes for manual attention
 
-`notes` lists what needs you:
+`notes` lists what you need to check or change:
 
 | Compose | Note |
 |---------|------|
-| Bind mount | Kubernetes has no host paths; use a ConfigMap, bake it into the image or use a PVC |
-| `depends_on` a service without ports | Nothing to wait for; make the dependent retry its connection |
-| `networks` | Not needed in Kubernetes; services reach each other by name |
+| Bind mount | The mount is left out. Use a ConfigMap, bake the files into the image or use a PVC |
+| `depends_on` a service without ports | The converter adds no init container. Make the dependent service retry its connection |
+| `networks` | Left out, because services reach each other by name (for example `http://db:5432`) |
 | `env_file` | Move the values into a ConfigMap or Secret |
-| Env var with no value (`- API_KEY`) | Compose reads it from the host; set it or use a Secret |
+| Env var with no value (`- API_KEY`) | Compose reads the value from the host. Set a value or use a Secret |
 | `build` without `image` | Push the image to a registry your cluster can pull from |
-| No limits / only reservations | Placeholder or copied values were added; adjust them |
-| Named volume | PVC size is a placeholder; shared volumes are ReadWriteOnce |
+| No limits / only reservations | The converter adds placeholder values or copies the reservations. Adjust them |
+| Named volume | The PVC size is a placeholder. A shared volume is ReadWriteOnce, so its pods must run on the same node |
 | External volume | A PVC with that name must already exist |
 
 ## Helm chart
 
-With `output: helm`, the same resources are written as a chart: `Chart.yaml`, a `values.yaml` holding what changes between environments (image, replicas, resources per service; size per volume) and one template per resource. Templates carry no namespace; Helm supplies the release namespace. The chart name comes from the top-level `name` of the compose file, with `app` as the fallback.
+With `output: helm`, the converter writes the same resources as a chart. The chart has a `Chart.yaml`, one template per resource and a `values.yaml` with what changes between environments: the image, replicas and resources of each service plus the size of each volume. The templates leave out the namespace, so Helm uses the release namespace. The chart takes its name from the top-level `name` of the compose file. Without a `name`, the chart is called `app`.
 
 ## Names
 
-Kubernetes names must be lowercase letters, digits and `-`, start with a letter and be at most 63 characters. Invalid names are fixed and noted:
+Kubernetes names must be lowercase letters, digits and `-`, start with a letter and be at most 63 characters. The converter fixes invalid names and adds a note:
 
 - `my_app` becomes `my-app`
 - `1api` becomes `svc-1api`
 
-If two services end up with the same name, conversion fails with an error.
+If two services end up with the same name, the conversion fails with an error.
 
 ## YAML parsing
 
-Values are read the way Docker Compose reads them, with YAML 1.2 rules:
+The converter reads values the way Docker Compose does, with YAML 1.2 rules:
 
 | Compose | YAML 1.1 would give | DevToolkit gives |
 |---------|---------------------|------------------|

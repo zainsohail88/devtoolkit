@@ -33,9 +33,11 @@ class TemplateConverter:
         or "awscc" (awscc only). layout: "files" (versions.tf, variables.tf, main.tf...) or
         "single" (main.tf)."""
         if provider not in PROVIDERS:
-            raise CfnError(f"Unknown provider '{provider}'. Use one of: {', '.join(PROVIDERS)}")
+            raise CfnError(
+                f"The provider '{provider}' is unknown. Use one of: {', '.join(PROVIDERS)}."
+            )
         if layout not in LAYOUTS:
-            raise CfnError(f"Unknown layout '{layout}'. Use one of: {', '.join(LAYOUTS)}")
+            raise CfnError(f"The layout '{layout}' is unknown. Use one of: {', '.join(LAYOUTS)}.")
         self.provider = provider
         self.layout = layout
         self.stack_name = stack_name
@@ -55,8 +57,8 @@ class TemplateConverter:
             template, names, hints = prepare_cdk(template, notes)
         if template.get("Rules"):
             notes.append(
-                "The Rules of the template were not converted; add the checks as variable "
-                "validation blocks or preconditions"
+                "The Rules section of the template was left out. Add its checks as validation "
+                "blocks on the variables or as preconditions."
             )
         converter = Converter(
             template, self.provider, self.stack_name, self.include_imports, names, hints
@@ -73,14 +75,19 @@ class TemplateConverter:
     def template_notes(self, template: dict[str, Any]) -> list[str]:
         """Notes about the template as a whole: unknown sections and transforms."""
         notes = [
-            f"Top-level section '{name}' is no part of a CloudFormation template and was ignored"
+            (
+                f"The top-level section '{name}' is unknown to CloudFormation, so the converter "
+                "ignored it. Check the spelling if you meant a CloudFormation section."
+            )
             for name in unknown_sections(template)
         ]
         for name in transforms(template):
             if name not in (SAM_TRANSFORM, LANGUAGE_EXTENSIONS):
                 notes.append(
-                    f"Transform '{name}' runs inside CloudFormation and was not applied; "
-                    "convert the template it produces instead"
+                    f"The transform '{name}' runs inside CloudFormation, so the converter cannot "
+                    "apply it. Convert the processed template instead. Get it with `aws "
+                    "cloudformation get-template --stack-name <stack> --template-stage "
+                    "Processed`."
                 )
         return notes
 

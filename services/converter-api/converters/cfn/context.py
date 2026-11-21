@@ -84,19 +84,25 @@ class Context(ExpressionConverter):
     def mapping_local(self, name: Any) -> str:
         """`local.<name>` for a mapping of the template."""
         if not isinstance(name, str) or name not in self.mappings:
-            raise CfnError(f"'Fn::FindInMap' refers to unknown mapping '{name}'")
+            raise CfnError(
+                f"'Fn::FindInMap' points to the mapping '{name}', but the template has no mapping "
+                "with that name."
+            )
         return f"local.{self.mappings[name]}"
 
     def condition(self, name: Any) -> str:
         """`local.<name>` for a condition of the template."""
         if not isinstance(name, str) or name not in self.conditions:
-            raise CfnError(f"Unknown condition '{name}'")
+            raise CfnError(
+                f"The template uses the condition '{name}', but Conditions has no entry with that "
+                "name."
+            )
         return f"local.{self.conditions[name]}"
 
     def ref(self, name: Any) -> Any:
         """The value of `Ref name`: a variable, a pseudo parameter or a resource."""
         if not isinstance(name, str):
-            raise CfnError("'Ref' takes the name of a parameter or resource")
+            raise CfnError("'Ref' needs the name of a parameter or resource as a string.")
         if name == "AWS::NoValue":
             return None
         if name in PSEUDO_DATA:
@@ -108,21 +114,28 @@ class Context(ExpressionConverter):
         if name == "AWS::StackId":
             self.stack_name_used = True
             self.note(
-                "AWS::StackId has no Terraform equivalent; the stack name (var.stack_name) "
-                "takes its place"
+                "AWS::StackId has no Terraform equivalent, so the converter uses the stack name "
+                "(var.stack_name) instead. Check that a name works where the template expects a "
+                "stack ID."
             )
             return Raw("var.stack_name")
         if name == "AWS::NotificationARNs":
-            self.note("AWS::NotificationARNs has no Terraform equivalent and became []")
+            self.note(
+                "AWS::NotificationARNs has no Terraform equivalent, so the converter uses an "
+                "empty list. Add the SNS topic ARNs by hand if you need them."
+            )
             return []
         if name in self.params:
             return Raw(self.param_expression(name))
         if name in self.resources:
             info = self.resources[name]
             if info.kind == "unsupported":
-                return Raw(self.unresolved(info, "Ref", "the value of Ref"))
+                return Raw(self.unresolved(info, "Ref", "The Ref value"))
             return Raw(info.expression(info.ref))
-        raise CfnError(f"'Ref' refers to '{name}', which is no parameter or resource")
+        raise CfnError(
+            f"'Ref' points to '{name}', but the template has no parameter or resource with that "
+            "name."
+        )
 
     def param_expression(self, name: str) -> str:
         """The expression for a parameter: its variable, or the SSM value it names."""
@@ -140,28 +153,38 @@ class Context(ExpressionConverter):
             resource, _, attribute = args.partition(".")
             args = [resource, attribute]
         if not isinstance(args, list) or len(args) != 2:
-            raise CfnError("'Fn::GetAtt' takes [resource, attribute]")
+            raise CfnError(
+                "'Fn::GetAtt' needs a resource and an attribute, written as [resource, "
+                "attribute] or 'Resource.Attribute'."
+            )
         logical_id, attribute = args
         if not isinstance(logical_id, str) or logical_id not in self.resources:
-            raise CfnError(f"'Fn::GetAtt' refers to unknown resource '{logical_id}'")
+            raise CfnError(
+                f"'Fn::GetAtt' points to '{logical_id}', but the template has no resource with "
+                "that name."
+            )
         if not isinstance(attribute, str):
             # An attribute name chosen at deploy time (e.g. !GetAtt [R, !Ref Param]).
             self.note(
-                f"Fn::GetAtt on '{logical_id}' with a computed attribute name was not converted"
+                f"Fn::GetAtt on '{logical_id}' builds its attribute name at deploy time, so the "
+                "value is null. Set it by hand."
             )
             return None
         info = self.resources[logical_id]
         if info.kind == "unsupported":
-            return Raw(self.unresolved(info, attribute, f"the '{attribute}' attribute"))
+            return Raw(self.unresolved(info, attribute, f"The '{attribute}' attribute"))
         if attribute in info.attrs:
             return Raw(info.expression(info.attrs[attribute]))
         if not ATTRIBUTE.match(attribute):
-            raise CfnError(f"'Fn::GetAtt' attribute '{attribute}' of '{logical_id}' is invalid")
+            raise CfnError(
+                f"'Fn::GetAtt' on '{logical_id}' asks for the attribute '{attribute}', but that "
+                "name is invalid. Use letters and digits, with dots between parts."
+            )
         tf_attribute = ".".join(snake(part) for part in attribute.split("."))
         if info.kind == "aws":
             self.note(
-                f"'{logical_id}.{attribute}' became '{info.address}.{tf_attribute}'; check that "
-                "attribute exists"
+                f"'{logical_id}.{attribute}' is converted to '{info.address}.{tf_attribute}'. "
+                "Check in the Terraform docs that this attribute exists."
             )
         return Raw(info.expression(tf_attribute))
 
@@ -170,5 +193,6 @@ class Context(ExpressionConverter):
         wanted = f"{info.logical_id}_{attribute}" if attribute != "Ref" else info.logical_id
         return self.placeholder_variable(
             wanted,
-            f"{what} of {info.logical_id} ({info.cfn_type}), which was not converted",
+            f"{what} of {info.logical_id} ({info.cfn_type}). The converter left that resource "
+            "out, so set this value by hand.",
         )

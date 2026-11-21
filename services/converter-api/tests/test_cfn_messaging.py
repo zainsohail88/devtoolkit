@@ -68,8 +68,8 @@ def test_queue_policy_for_several_queues_and_a_computed_list():
     assert "queue_url = aws_sqs_queue.a.url" in main
     assert 'resource "aws_sqs_queue_policy" "policy_target_2"' in main
     assert 'resource "aws_sqs_queue_policy" "policy_a"' in main
-    assert "Queues was not converted" in main
-    assert any("Computed.Queues' was not converted" in n for n in notes)
+    assert "Queues was left out" in main
+    assert any("Computed.Queues' yet" in n for n in notes)
 
 
 def test_topic_subscriptions():
@@ -95,8 +95,8 @@ def test_topic_subscriptions():
     )
     assert 'resource "aws_sns_topic_subscription" "one_subscription"' in main
     assert "topic_arn = aws_sns_topic.one.arn" in main
-    assert "Subscription was not converted" in main
-    assert any("Computed: Subscription is computed" in n for n in notes)
+    assert "Subscription was left out" in main
+    assert any("Computed: Subscription comes from a function" in n for n in notes)
     assert 'resource "aws_sns_topic" "plain" {}' in main
     assert "arn = aws_sns_topic.one.arn" in main
     assert "aws_sns_topic.one.name" in main
@@ -214,7 +214,7 @@ def test_rule_targets_of_every_kind():
     assert "assign_public_ip = true" in main
     assert 'subnets = ["s"]' in main
     assert 'resource "aws_cloudwatch_event_target" "rule_ecs3"' in main
-    assert any("Computed: Targets is computed" in n for n in notes)
+    assert any("Computed: Targets comes from a function" in n for n in notes)
     assert not [n for n in notes if "property" in n]
 
 
@@ -227,7 +227,7 @@ def test_event_bus_without_policy_and_plain_stream():
     )
     assert "aws_cloudwatch_event_bus_policy" not in main
     assert 'name        = "${var.stack_name}-Stream"' in main
-    assert any("Stream had no Name" in n for n in notes)
+    assert any("Stream: the template leaves out Name" in n for n in notes)
 
 
 def _machine(props: dict) -> dict:
@@ -262,7 +262,7 @@ def test_definition_substitutions_on_an_object():
     assert '"calls ${aws_sqs_queue.q.arn} with $${Other}"' in main
     assert 'Next     = "${Missing}"' not in main and '"$${Missing}"' in main
     assert "aws_sfn_state_machine.m.name" in main
-    assert notes == [] or not [n for n in notes if "not converted" in n]
+    assert notes == [] or not [n for n in notes if "left out" in n]
 
 
 def test_definition_string_forms():
@@ -304,7 +304,7 @@ def test_definition_string_forms():
     )
     assert 'StartAt = "A"' in main
     assert 'definition = "not json ${X}"' not in main and 'definition = "not json $${X}"' in main
-    assert any("Bad: DefinitionSubstitutions could not be applied" in n for n in notes)
+    assert any("Bad: the converter cannot apply DefinitionSubstitutions" in n for n in notes)
     assert 'StartAt = "First"' in main
     assert 'definition = "not ${data.aws_region.current.region}"' in main
     assert 'definition = "{\\"StartAt\\":\\"A\\"}"' in main
@@ -503,10 +503,10 @@ def test_optional_subscriptions_and_rule_targets_are_counted():
     assert "count = local.on ? 1 : 0" in target and "arn = aws_sqs_queue.q.arn" in target
     assert main.count('resource "aws_sns_topic_subscription"') == 1
     assert main.count('resource "aws_cloudwatch_event_target"') == 1
-    assert "Subscription[2] was not converted" in main
-    assert "Targets[2] was not converted" in main
-    assert any("'Topic.Subscription[2]' is computed by a function" in n for n in notes)
-    assert any("'Rule.Targets[2]' is computed by a function" in n for n in notes)
+    assert "Subscription[2] was left out" in main
+    assert "Targets[2] was left out" in main
+    assert any("'Topic.Subscription[2]' comes from a function" in n for n in notes)
+    assert any("'Rule.Targets[2]' comes from a function" in n for n in notes)
 
 
 def _ecs_rule(network: object) -> dict:
@@ -549,9 +549,9 @@ def test_ecs_target_network_configuration_from_functions():
     )
     main = squash(main)
     assert 'assign_public_ip = (local.on ? "ENABLED" : "DISABLED") == "ENABLED"' in main
-    assert "NetworkConfiguration was not converted" in main
-    assert "AwsVpcConfiguration was not converted" in main
-    assert "ArrayProperties was not converted" in main
+    assert "NetworkConfiguration was left out" in main
+    assert "AwsVpcConfiguration was left out" in main
+    assert "ArrayProperties was left out" in main
     assert any("Computed.Targets[0].EcsParameters.NetworkConfiguration" in n for n in notes)
     assert any("Inner.Targets[0].EcsParameters.NetworkConfiguration.AwsVpc" in n for n in notes)
 

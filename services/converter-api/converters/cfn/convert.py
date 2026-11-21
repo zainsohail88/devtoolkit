@@ -82,7 +82,9 @@ class Converter:
         """Convert `template` with `provider`. `names` are wanted Terraform names by logical
         id (from the CDK step) and `hints` facts for converters by logical id."""
         if provider not in PROVIDERS:
-            raise CfnError(f"Unknown provider '{provider}'. Use one of: {', '.join(PROVIDERS)}")
+            raise CfnError(
+                f"The provider '{provider}' is unknown. Use one of: {', '.join(PROVIDERS)}."
+            )
         self.template = template
         self.ctx = Context(template, provider)
         self.stack_name = stack_name
@@ -116,8 +118,8 @@ class Converter:
             description = spec.get("Description") or labels.get(cfn_name)
             if ssm:
                 description = (
-                    f"{description + ' ' if description else ''}"
-                    f"(name of the SSM parameter that holds the value)"
+                    f"{description + ' ' if description else ''}(the name of the SSM parameter "
+                    "that holds the value)"
                 ).strip()
             if description:
                 body.append(Attr("description", str(description)))
@@ -166,7 +168,7 @@ class Converter:
             rules.append(
                 (
                     f"contains({hcl.inline(values)}, {ref})",
-                    f"Must be one of: {', '.join(str(v) for v in values)}.",
+                    f"The value must be one of: {', '.join(str(v) for v in values)}.",
                 )
             )
         if tf_type == "string":
@@ -175,7 +177,7 @@ class Converter:
                 rules.append(
                     (
                         f"can(regex({hcl.quote('^(?:' + pattern + ')$')}, {ref}))",
-                        f"Must match the pattern {pattern}.",
+                        f"The value must match the pattern {pattern}.",
                     )
                 )
             for key, operator, words in (
@@ -187,7 +189,7 @@ class Converter:
                     rules.append(
                         (
                             f"length({ref}) {operator} {limit}",
-                            f"Must be {words} {limit} characters.",
+                            f"The value must be {words} {limit} characters long.",
                         )
                     )
         if tf_type == "number":
@@ -197,7 +199,9 @@ class Converter:
             ):
                 if spec.get(key) is not None:
                     limit = parameter_default(spec[key], "number")
-                    rules.append((f"{ref} {operator} {limit}", f"Must be {words} {limit}."))
+                    rules.append(
+                        (f"{ref} {operator} {limit}", f"The value must be {words} {limit}.")
+                    )
         blocks = []
         for condition, message in rules:
             text = sentence(str(constraint)) if constraint else message
@@ -301,13 +305,14 @@ class Converter:
                 self._import(info, resource)
         for cfn_type in sorted(awscc_types):
             reason = (
-                "the awscc provider was requested"
+                "you chose the awscc provider"
                 if self.ctx.provider == "awscc"
-                else "it has no hand-written aws mapping yet"
+                else "the converter has no aws provider mapping for it yet"
             )
             self.ctx.note(
-                f"{cfn_type} uses the awscc provider ({reason}): awscc mirrors the "
-                f"CloudFormation schema, so check {awscc_type(cfn_type)} in the awscc docs"
+                f"{cfn_type} is converted with the awscc provider because {reason}. The awscc "
+                f"arguments follow the CloudFormation schema, so check {awscc_type(cfn_type)} in "
+                "the awscc provider docs."
             )
 
     def _resource_block(self, builder: Builder, resource: dict[str, Any]) -> Block:
@@ -322,7 +327,10 @@ class Converter:
             for target in targets:
                 other = self.ctx.resources.get(str(target))
                 if other is None:
-                    raise CfnError(f"'{info.logical_id}' DependsOn unknown resource '{target}'")
+                    raise CfnError(
+                        f"'{info.logical_id}' has DependsOn '{target}', but the template has no "
+                        "resource with that name."
+                    )
                 if other.kind != "unsupported":
                     addresses.append(Raw(other.address))
             if addresses:
@@ -332,17 +340,18 @@ class Converter:
         if policy in ("Retain", "RetainExceptOnCreate"):
             lifecycle.append(Attr("prevent_destroy", True))
             self.ctx.note(
-                f"{info.logical_id} has DeletionPolicy {policy}: it became prevent_destroy, so "
-                "`terraform destroy` fails where CloudFormation leaves the resource behind; use "
-                "a `removed` block with `destroy = false` to let go of it"
+                f"{info.logical_id} has DeletionPolicy {policy}, so the converter adds "
+                "prevent_destroy. `terraform destroy` then fails, while CloudFormation would "
+                "keep the resource. To let go of it, use a `removed` block with `destroy = "
+                "false`."
             )
         elif policy == "Snapshot" and info.cfn_type not in (
             "AWS::RDS::DBInstance",
             "AWS::RDS::DBCluster",
         ):
             self.ctx.note(
-                f"{info.logical_id} has DeletionPolicy Snapshot: Terraform takes no snapshot "
-                "on destroy; take one by hand first"
+                f"{info.logical_id} has DeletionPolicy Snapshot, but Terraform takes no snapshot "
+                "on destroy. Take a snapshot by hand before you destroy it."
             )
         # prevent_destroy also blocks replacement, so a Retain update policy is covered.
         if resource.get("UpdateReplacePolicy") == "Snapshot" or (
@@ -350,20 +359,21 @@ class Converter:
             and policy not in ("Retain", "RetainExceptOnCreate")
         ):
             self.ctx.note(
-                f"{info.logical_id} has UpdateReplacePolicy "
-                f"{resource['UpdateReplacePolicy']}: Terraform has no equivalent"
+                f"{info.logical_id}: UpdateReplacePolicy {resource['UpdateReplacePolicy']} has no "
+                "Terraform equivalent, so it was left out. Check `terraform plan` for "
+                "replacements before you apply."
             )
         for attribute in ("CreationPolicy", "UpdatePolicy"):
             if resource.get(attribute):
                 self.ctx.note(
-                    f"{info.logical_id} has a {attribute}, which only CloudFormation applies; "
-                    "it was not converted"
+                    f"{info.logical_id}: {attribute} only works in CloudFormation, so it was left "
+                    "out. Handle signals or rolling updates another way if you rely on it."
                 )
         metadata = resource.get("Metadata")
         if isinstance(metadata, dict) and "AWS::CloudFormation::Init" in metadata:
             self.ctx.note(
-                f"{info.logical_id} uses AWS::CloudFormation::Init (cfn-init), which runs "
-                "inside CloudFormation only; move it into user_data (cloud-init) or an AMI"
+                f"{info.logical_id} uses AWS::CloudFormation::Init (cfn-init), which only runs in "
+                "CloudFormation. Move that setup into user_data (cloud-init) or an AMI."
             )
         if lifecycle:
             meta.append(Block("lifecycle", [], lifecycle))
@@ -376,16 +386,27 @@ class Converter:
         if info.cfn_type.startswith("Custom::") or info.cfn_type == (
             "AWS::CloudFormation::CustomResource"
         ):
-            why = "custom resources run a Lambda function or SNS topic during stack operations"
+            why = (
+                "Custom resources call a Lambda function or SNS topic during stack operations, "
+                "which only CloudFormation does. Rebuild that logic in Terraform or run it "
+                "another way."
+            )
         elif info.cfn_type.startswith("AWS::CloudFormation::"):
-            why = "it exists inside CloudFormation only"
+            why = (
+                "This type only exists inside CloudFormation. Replace it with a Terraform "
+                "feature, such as a module for a nested stack."
+            )
         else:
-            why = "the aws mappings and the awscc provider both lack this type"
-        self.ctx.note(f"{info.logical_id} ({info.cfn_type}) was not converted: {why}")
+            why = (
+                "Neither the aws mappings nor the awscc provider covers this type. Write the "
+                "Terraform resource by hand."
+            )
+        self.ctx.note(f"{info.logical_id} ({info.cfn_type}) was left out. {why}")
         self.resources.append(
             Comment(
-                f"{info.logical_id} ({info.cfn_type}) was not converted, see the notes.\n"
-                f"Properties: {snippet(resource.get('Properties') or {})}"
+                f"{info.logical_id} ({info.cfn_type}) was left out. See the notes for the "
+                "reason.\n"
+                f"CloudFormation properties: {snippet(resource.get('Properties') or {})}"
             )
         )
 
@@ -400,7 +421,7 @@ class Converter:
         target = f"{info.address}[0]" if info.conditional else info.address
         body = [
             Attr("to", Raw(target)),
-            Attr("id", identifier_value or f"TODO: physical ID of {info.logical_id}"),
+            Attr("id", identifier_value or f"TODO: the physical ID of {info.logical_id}"),
         ]
         self.imports.append(Block("import", [], body))
 
@@ -433,8 +454,8 @@ class Converter:
                 if shown.startswith('"') and shown.endswith('"'):
                     shown = shown[1:-1]
                 self.ctx.note(
-                    f"Output {name} was exported as '{shown}': Terraform has no exports; other "
-                    "configurations can read it with terraform_remote_state"
+                    f"Output {name} is exported as '{shown}'. Terraform has no stack exports, so "
+                    "other configurations read the output with terraform_remote_state."
                 )
             self.outputs.append(Block("output", [tf_name], body))
 
@@ -489,7 +510,9 @@ class Converter:
         if self.ctx.stack_name_used:
             name = "stack_name"
             body: list[Any] = [
-                Attr("description", "Name of the stack (replaces AWS::StackName)"),
+                Attr(
+                    "description", "The stack name, used wherever the template reads AWS::StackName"
+                ),
                 Attr("type", Raw("string")),
             ]
             if self.stack_name:
@@ -501,7 +524,7 @@ class Converter:
     def files(self, layout: str) -> list[dict[str, str]]:
         """The Terraform files, one per kind or a single main.tf."""
         if layout not in LAYOUTS:
-            raise CfnError(f"Unknown layout '{layout}'. Use one of: {', '.join(LAYOUTS)}")
+            raise CfnError(f"The layout '{layout}' is unknown. Use one of: {', '.join(LAYOUTS)}.")
         variables = self._all_variables()
         local_block = [Block("locals", [], self.locals)] if self.locals else []
         data = list(self.ctx.data_sources.values())
@@ -510,12 +533,13 @@ class Converter:
         if self.imports:
             import_blocks = [
                 Comment(
-                    "Adopt the resources the stack created. Replace each TODO with the\n"
-                    "physical ID of the resource:\n"
+                    "These import blocks adopt the resources the stack already created.\n"
+                    "Replace each TODO with the physical ID of the resource. To list them, run:\n"
                     "  aws cloudformation describe-stack-resources --stack-name <stack>\n"
-                    "Most types import by that ID; the Import section in the docs of each\n"
-                    "resource type says which ID it takes. Set DeletionPolicy: Retain on every\n"
-                    "resource and delete the stack once `terraform plan` shows no changes."
+                    "Most types import by that ID. The Import section in the Terraform docs of\n"
+                    "each resource type says which ID it takes. Set DeletionPolicy: Retain on\n"
+                    "every resource, then delete the stack once `terraform plan` shows no "
+                    "changes."
                 )
             ] + self.imports
         if layout == "single":
