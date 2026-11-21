@@ -48,7 +48,7 @@ def test_parse_duration(value, seconds):
 
 @pytest.mark.parametrize("value", ["", "soon", "10x", "-5s", True, 0, "inf"])
 def test_parse_duration_invalid(value):
-    with pytest.raises(ComposeError, match="invalid duration"):
+    with pytest.raises(ComposeError, match="must be a duration"):
         parse_duration(value, "interval", "web")
 
 
@@ -130,7 +130,7 @@ def test_named_volume_becomes_pvc_and_mount():
     assert pvcs[0]["kind"] == "PersistentVolumeClaim"
     assert pvcs[0]["metadata"] == {"name": "dbdata", "namespace": "default"}
     assert pvcs[0]["spec"]["resources"]["requests"]["storage"] == DEFAULT_VOLUME_SIZE
-    assert any("placeholder size" in n for n in result["notes"])
+    assert any("The size is a placeholder" in n for n in result["notes"])
 
 
 def test_shared_named_volume_is_one_pvc_with_a_warning():
@@ -187,17 +187,17 @@ def test_long_syntax_volume_and_external_volume():
     assert [p["metadata"]["name"] for p in result["manifests"]["persistent_volume_claims"]] == [
         "media"
     ]
-    assert any("must already exist" in n for n in result["notes"])
+    assert any("Create a PersistentVolumeClaim named" in n for n in result["notes"])
 
 
 def test_volume_errors():
-    with pytest.raises(ComposeError, match="missing 'target'"):
+    with pytest.raises(ComposeError, match="needs a 'target'"):
         convert_volumes("web", {"volumes": [{"type": "volume", "source": "x"}]}, {})
-    with pytest.raises(ComposeError, match="invalid volume entry"):
+    with pytest.raises(ComposeError, match="volume entry 'a:b:c:d' is invalid"):
         convert_volumes("web", {"volumes": ["a:b:c:d"]}, {})
     with pytest.raises(ComposeError, match="absolute path"):
         convert_volumes("web", {"volumes": ["data:relative/path"]}, {})
-    with pytest.raises(ComposeError, match="top-level 'volumes' must be a mapping"):
+    with pytest.raises(ComposeError, match="top-level 'volumes' section must be a mapping"):
         convert("services:\n  web:\n    image: x\nvolumes: [a, b]\n")
 
 
@@ -206,7 +206,7 @@ def test_unsupported_volume_type_is_skipped_with_note():
         "web", {"volumes": [{"type": "npipe", "source": "x", "target": "/x"}]}, {}
     )
     assert volumes == [] and mounts == [] and claims == []
-    assert "not supported" in notes[0]
+    assert "was left out" in notes[0]
 
 
 # --- depends_on -> init containers -------------------------------------------------------
@@ -254,13 +254,13 @@ def test_depends_on_without_services_is_a_note():
         include_service=False,
     )
     assert "initContainers" not in container_of(result)
-    assert any("Services were disabled" in n for n in result["notes"])
+    assert any("Services are turned off" in n for n in result["notes"])
 
 
 def test_depends_on_errors():
-    with pytest.raises(ComposeError, match="unknown service 'db'"):
+    with pytest.raises(ComposeError, match="has no service with that name"):
         convert("services:\n  web:\n    image: x\n    depends_on: [db]\n")
-    with pytest.raises(ComposeError, match="must be a list or a mapping"):
+    with pytest.raises(ComposeError, match="must be a list of service names or a mapping"):
         convert_depends_on("web", {"depends_on": "db"}, {"db": {}}, True)
 
 
@@ -283,7 +283,7 @@ def test_reservations_without_limits_become_guaranteed():
     )
     resources = container_of(result)["containers"][0]["resources"]
     assert resources["requests"] == resources["limits"] == {"cpu": "250m", "memory": "64Mi"}
-    assert any("limits set equal to the reservations" in n for n in result["notes"])
+    assert any("set the limits to the reservations" in n for n in result["notes"])
 
 
 LIMITS_ONLY = (
@@ -390,7 +390,7 @@ def test_render_helm_without_resources_block():
 
 
 def test_render_unknown_output():
-    with pytest.raises(ComposeError, match="Unknown output"):
+    with pytest.raises(ComposeError, match="Output 'kustomize' is unknown"):
         render_files(convert("services:\n  web:\n    image: x\n"), "kustomize")
 
 

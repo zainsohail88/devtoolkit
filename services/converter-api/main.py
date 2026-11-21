@@ -32,7 +32,10 @@ def resolve_log_level(value: str | None) -> tuple[str, str | None]:
     if level in LOG_LEVELS:
         return level, None
     allowed = ", ".join(name.lower() for name in LOG_LEVELS)
-    return "INFO", f"Unknown LOG_LEVEL {value!r}; using 'info'. Allowed: {allowed}"
+    return (
+        "INFO",
+        f"LOG_LEVEL {value!r} is unknown, so the service logs at info. Use one of: {allowed}.",
+    )
 
 
 logger = logging.getLogger("converter-api")
@@ -50,10 +53,10 @@ def configure_logging(value: str | None) -> str:
 LOG_LEVEL = configure_logging(os.getenv("LOG_LEVEL"))
 
 app = FastAPI(
-    title="DevToolkit converter-api",
+    title="DevToolkit converter API",
     description=(
-        "Convert docker-compose files into Kubernetes manifests and CloudFormation, AWS SAM "
-        "and AWS CDK templates into Terraform."
+        "Converts docker-compose files to Kubernetes manifests or a Helm chart. "
+        "Converts CloudFormation, AWS SAM and AWS CDK templates to Terraform."
     ),
     version="1.0.0",
 )
@@ -148,8 +151,8 @@ def convert_cfn(request: CfnRequest) -> dict[str, Any] | JSONResponse:
             status_code=400,
             content={
                 "success": False,
-                "error": "This template has a structure the converter cannot handle yet. "
-                "Please open an issue with a small example.",
+                "error": "The converter failed on an unexpected structure in this template. "
+                "Open an issue with a small example template so it can be fixed.",
             },
         )
     response: dict[str, Any] = {"success": True}
@@ -170,7 +173,7 @@ def validate_yaml(request: ValidateRequest) -> dict[str, Any]:
         # Only the parser's description of the input is returned, never the exception text.
         problem = getattr(exc, "problem", None) or "syntax error"
         mark = getattr(exc, "problem_mark", None)
-        response: dict[str, Any] = {"valid": False, "error": f"Invalid YAML: {problem}"}
+        response: dict[str, Any] = {"valid": False, "error": f"The YAML is invalid: {problem}."}
         if mark is not None:
             response["line"] = mark.line + 1
             response["column"] = mark.column + 1
